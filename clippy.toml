@@ -1,0 +1,3 @@
+# Proper nouns that look like code to `doc_markdown` (internal capitals) but aren't items
+# to backtick. `..` keeps clippy's built-in default list.
+doc-valid-idents = ["Forgejo", "Codeberg", "OAuth", "MFA", ".."]

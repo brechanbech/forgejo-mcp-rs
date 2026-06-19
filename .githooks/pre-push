@@ -1,0 +1,25 @@
+#!/bin/sh
+# Pre-push gate: mirrors CI (.forgejo/workflows/ci.yml) so a green push stays green in CI.
+# POSIX sh for portability (macOS/FreeBSD). Bypass in a pinch with `git push --no-verify`.
+#
+# Activate once per clone:  git config core.hooksPath .githooks
+set -e
+
+echo "pre-push: fmt"
+cargo fmt --all --check
+
+echo "pre-push: clippy"
+cargo clippy --all-targets -- -D warnings
+
+echo "pre-push: tests"
+cargo test --quiet
+
+# cargo deny is part of CI but optional locally; run it only if installed.
+if command -v cargo-deny >/dev/null 2>&1; then
+	echo "pre-push: cargo deny"
+	cargo deny check
+else
+	echo "pre-push: skipping cargo deny (cargo-deny not installed)"
+fi
+
+echo "pre-push: all gates passed"

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    # Codeberg's hosted runners advertise codeberg-tiny|small|medium. medium gives a 10-min
+    # window — ample for the first, uncached pull of the Rust image and the build.
+    runs-on: codeberg-medium
+    container:
+      # The full `rust` image (buildpack-deps base) ships libssl-dev + pkg-config, which
+      # reqwest's default-tls (openssl-sys) needs to build on Linux.
+      image: rust:latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        # The rust image has no Node, and Codeberg's runner doesn't inject one into custom
+        # job containers, so the JS-based actions/checkout can't run. Clone manually with
+        # the git that ships in the image instead.
+        run: |
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          git -c protocol.version=2 fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+      - name: Toolchain
+        run: rustc --version && cargo --version
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+  deny:
+    # Separate job so building the cargo-deny binary gets its own time window.
+    runs-on: codeberg-medium
+    container:
+      image: rust:latest
+    steps:
+      - name: Checkout
+        run: |
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          git -c protocol.version=2 fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+      - name: cargo deny
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
