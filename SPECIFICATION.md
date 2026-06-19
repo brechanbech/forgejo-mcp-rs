@@ -65,14 +65,18 @@ The server refuses to start without `FORGEJO_TOKEN`, with a clear message.
 | Tool | Status | Purpose |
 |---|---|---|
 | `whoami` | **done** | The authenticated user (verifies the token). |
-| `list_my_repos` | planned | Repositories owned by the token's user. |
-| `list_issues` | planned | Issues in `owner/repo` (open/closed/all). |
-| `get_issue` | planned | One issue by index. |
-| `list_pull_requests` | planned | Pull requests in `owner/repo`. |
-| `get_pull_request` | planned | One pull request by index. |
-| `search_repos` | planned | Search repositories by query. |
+| `list_my_repos` | **done** | Repositories owned by the token's user (first page). |
+| `list_issues` | **done** | Issues in `owner/repo` (open by default). |
+| `get_issue` | **done** | One issue by number. |
+| `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default). |
+| `get_pull_request` | **done** | One pull request by number. |
+| `search_repos` | **done** | Search repositories by keyword. |
 
 Each tool returns the relevant `forgejo-api` struct(s) serialized as pretty JSON.
+
+**v0.1 limitations (planned refinements):** the list tools use default queries — no
+state (open/closed/all), pagination, or sort parameters are exposed yet, and only the first
+page is returned. Output is the full upstream struct(s), not slimmed summaries.
 
 ### v0.2 — writes (not yet built)
 

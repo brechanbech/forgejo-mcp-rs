@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use forgejo_api::{Auth, Forgejo};
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use url::Url;
@@ -64,6 +65,57 @@ impl ForgejoMcp {
     #[tool(description = "Report the authenticated Forgejo/Codeberg user (verifies the token)")]
     async fn whoami(&self) -> Result<CallToolResult, McpError> {
         tools::whoami(&self.forgejo).await
+    }
+
+    /// Lists the authenticated user's repositories.
+    #[tool(description = "List the authenticated user's repositories")]
+    async fn list_my_repos(&self) -> Result<CallToolResult, McpError> {
+        tools::list_my_repos(&self.forgejo).await
+    }
+
+    /// Lists issues in a repository.
+    #[tool(description = "List issues in a repository (owner/repo); open issues by default")]
+    async fn list_issues(
+        &self,
+        Parameters(params): Parameters<tools::RepoRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_issues(&self.forgejo, params).await
+    }
+
+    /// Gets one issue by number.
+    #[tool(description = "Get one issue by number from a repository (owner/repo/index)")]
+    async fn get_issue(
+        &self,
+        Parameters(params): Parameters<tools::RepoItemRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_issue(&self.forgejo, params).await
+    }
+
+    /// Lists pull requests in a repository.
+    #[tool(description = "List pull requests in a repository (owner/repo); open by default")]
+    async fn list_pull_requests(
+        &self,
+        Parameters(params): Parameters<tools::RepoRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_pull_requests(&self.forgejo, params).await
+    }
+
+    /// Gets one pull request by number.
+    #[tool(description = "Get one pull request by number from a repository (owner/repo/index)")]
+    async fn get_pull_request(
+        &self,
+        Parameters(params): Parameters<tools::RepoItemRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_pull_request(&self.forgejo, params).await
+    }
+
+    /// Searches repositories.
+    #[tool(description = "Search repositories by keyword")]
+    async fn search_repos(
+        &self,
+        Parameters(params): Parameters<tools::SearchReposParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::search_repos(&self.forgejo, params).await
     }
 }
 

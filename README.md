@@ -7,9 +7,9 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for
 an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
 repositories, issues, and pull requests — over the Forgejo REST API.
 
-> Status: **early development (v0.1, read-only).** The `whoami` tool works end-to-end;
-> repos / issues / pull-requests tools are next. See [`SPECIFICATION.md`](SPECIFICATION.md)
-> for the full plan.
+> Status: **v0.1, read-only.** Seven read tools — the authenticated user, repositories,
+> issues, pull requests, and repository search — over the Forgejo REST API. See
+> [`SPECIFICATION.md`](SPECIFICATION.md) for the full plan; writes land in v0.2.
 
 It's a thin tool layer over the [`forgejo-api`](https://crates.io/crates/forgejo-api) crate
 (a maintained, typed Forgejo client) — an **independent implementation over the documented
@@ -64,12 +64,14 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | Tool | Status | Notes |
 |---|---|---|
 | `whoami` | ✅ | The authenticated user (verifies the token) |
-| `list_my_repos` | planned | Your repositories |
-| `list_issues` / `get_issue` | planned | Issues in `owner/repo` |
-| `list_pull_requests` / `get_pull_request` | planned | Pull requests in `owner/repo` |
-| `search_repos` | planned | Repository search |
+| `list_my_repos` | ✅ | Your repositories (first page) |
+| `list_issues` / `get_issue` | ✅ | Issues in `owner/repo` (open by default) |
+| `list_pull_requests` / `get_pull_request` | ✅ | Pull requests in `owner/repo` (open by default) |
+| `search_repos` | ✅ | Repository search by keyword |
 
-Write tools (create issue / comment) are deferred to v0.2 — see the specification.
+The list tools use default queries (first page, open items) — state/pagination/sort filters
+aren't exposed yet. Write tools (create issue / comment) are deferred to v0.2 — see the
+[specification](SPECIFICATION.md).
 
 ## Security
 
