@@ -122,6 +122,14 @@ CI runs the same on [Codeberg Forgejo Actions](.forgejo/workflows/ci.yml); a tra
 [`.githooks/pre-push`](.githooks/pre-push) hook mirrors it locally
 (`git config core.hooksPath .githooks`).
 
+## Credits
+
+This server stands almost entirely on [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api)
+by **Cyborus** — the typed, maintained Forgejo client that does the real work. The hard part,
+modelling Forgejo's REST surface and tracking its swagger, lives in that crate;
+`forgejo-mcp-rs` is just a thin MCP adaptor over it. Sincere thanks to Cyborus and the
+`forgejo-api` contributors. (`forgejo-api` is licensed Apache-2.0 OR MIT.)
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
