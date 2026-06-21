@@ -42,13 +42,14 @@ sibling `kicad-mcp-rs` project.
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `FORGEJO_TOKEN` | **yes** | — | Read access token (read-only scopes suffice for the read tools). |
+| `FORGEJO_TOKEN_READ_ONLY` | **yes**\* | — | Read token (read-only scopes suffice). `FORGEJO_TOKEN` is accepted as a fallback. |
 | `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Its presence enables the write tools**; absent ⇒ the server is read-only. |
 | `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window, clamped to `1..=60`. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 | `RUST_LOG` | no | `forgejo_mcp_rs=info` | Tracing filter (logs go to stderr). |
 
-The server refuses to start without `FORGEJO_TOKEN`, with a clear message.
+\* A read token is required (under either name); the server refuses to start without one,
+with a clear message.
 
 ## Security model
 

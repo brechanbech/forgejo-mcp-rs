@@ -49,21 +49,24 @@ impl std::fmt::Debug for ForgejoMcp {
 
 impl ForgejoMcp {
     /// Builds the server from the environment: `FORGEJO_URL` (default `https://codeberg.org`),
-    /// `FORGEJO_TOKEN` (required — read-only is enough for the read tools), and optionally
-    /// `FORGEJO_TOKEN_WRITE` (enables the write tools) and `FORGEJO_WRITE_MINUTES` (default
-    /// write-mode window, clamped to `1..=60`).
+    /// a read token in `FORGEJO_TOKEN_READ_ONLY` (or `FORGEJO_TOKEN`) — required, read-only
+    /// scopes are enough — and optionally `FORGEJO_TOKEN_WRITE` (enables the write tools) and
+    /// `FORGEJO_WRITE_MINUTES` (default write-mode window, clamped to `1..=60`).
     ///
     /// # Errors
-    /// Fails if `FORGEJO_TOKEN` is unset, `FORGEJO_URL` is malformed, or a client can't be
+    /// Fails if no read token is set, `FORGEJO_URL` is malformed, or a client can't be
     /// constructed.
     pub fn from_env() -> anyhow::Result<Self> {
         let url_raw = std::env::var("FORGEJO_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
         let url = Url::parse(&url_raw)
             .with_context(|| format!("FORGEJO_URL is not a valid URL: {url_raw}"))?;
-        let token = std::env::var("FORGEJO_TOKEN").context(
-            "FORGEJO_TOKEN is required — set it to a Forgejo/Codeberg access token \
-             (read-only scopes are enough for the read tools)",
-        )?;
+        // Prefer the explicit read-only name; accept FORGEJO_TOKEN too (convention).
+        let token = std::env::var("FORGEJO_TOKEN_READ_ONLY")
+            .or_else(|_| std::env::var("FORGEJO_TOKEN"))
+            .context(
+                "a read token is required — set FORGEJO_TOKEN_READ_ONLY (or FORGEJO_TOKEN) to \
+                 a Forgejo/Codeberg access token (read-only scopes are enough)",
+            )?;
         let forgejo = Forgejo::new(Auth::Token(&token), url.clone())
             .map_err(|e| anyhow::anyhow!("building the Forgejo client: {e}"))?;
 

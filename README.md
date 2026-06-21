@@ -29,7 +29,7 @@ The server is configured by environment variables:
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `FORGEJO_TOKEN` | **yes** | — | Read token. **Read-only scopes are enough** for the read tools. |
+| `FORGEJO_TOKEN_READ_ONLY` | **yes** | — | Read token (or `FORGEJO_TOKEN`). **Read-only scopes are enough.** |
 | `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Providing it enables the write tools**; omit it for a pure read-only server. |
 | `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
@@ -52,7 +52,8 @@ for the full design (and the honest "guardrail, not sandbox" caveat).
 ```sh
 claude mcp add --scope user forgejo /path/to/target/release/forgejo-mcp-rs \
   --env FORGEJO_URL=https://codeberg.org \
-  --env FORGEJO_TOKEN=your_token_here
+  --env FORGEJO_TOKEN_READ_ONLY=your_read_token_here
+# add --env FORGEJO_TOKEN_WRITE=… only if you want the (gated) write tools
 ```
 
 ### Or Claude Desktop
@@ -62,7 +63,7 @@ claude mcp add --scope user forgejo /path/to/target/release/forgejo-mcp-rs \
   "mcpServers": {
     "forgejo": {
       "command": "/path/to/target/release/forgejo-mcp-rs",
-      "env": { "FORGEJO_URL": "https://codeberg.org", "FORGEJO_TOKEN": "your_token_here" }
+      "env": { "FORGEJO_URL": "https://codeberg.org", "FORGEJO_TOKEN_READ_ONLY": "your_read_token_here" }
     }
   }
 }
