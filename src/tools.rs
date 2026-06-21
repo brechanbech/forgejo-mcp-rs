@@ -5,8 +5,9 @@
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
 
 use forgejo_api::structs::{
-    CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState, RepoListPullRequestsQuery,
-    RepoListPullRequestsQueryState, RepoSearchQuery, UserCurrentListReposQuery,
+    CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState, NotifyGetListQuery,
+    RepoListPullRequestsQuery, RepoListPullRequestsQueryState, RepoSearchQuery,
+    UserCurrentListReposQuery,
 };
 use forgejo_api::{ApiErrorKind, CountHeader, Forgejo, ForgejoError};
 use rmcp::ErrorData as McpError;
@@ -242,6 +243,132 @@ pub async fn search_repos(
     // unknown here — surface the items in the same envelope for consistency.
     let results = req.await.map_err(to_mcp)?;
     let items = results.data.unwrap_or_default();
+    paged_result(params.page, params.limit, None, &items)
+}
+
+/// Lists the organizations the authenticated user belongs to.
+pub async fn list_orgs(forgejo: &Forgejo, params: PageParams) -> Result<CallToolResult, McpError> {
+    let mut req = forgejo.org_list_current_user_orgs();
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    // Returns `Vec<Organization>` (no count header), so `total` is unknown here.
+    let orgs = req.await.map_err(to_mcp)?;
+    paged_result(params.page, params.limit, None, &orgs)
+}
+
+/// Parameters for the `list_notifications` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListNotificationsParams {
+    /// Include read notifications too. Default: unread only.
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+// A loose notification shape we deserialize into directly. `forgejo-api`'s strict
+// `NotificationThread` fails the whole page if any item has a value its enums don't model
+// (notably `StateType` has no `merged`, so a merged-PR notification breaks the list). We
+// capture only the fields we surface, with the volatile ones as plain strings, and ignore
+// the rest (including the full embedded repository object).
+#[derive(Debug, serde::Deserialize)]
+struct LooseNotification {
+    id: Option<i64>,
+    unread: Option<bool>,
+    repository: Option<LooseRepo>,
+    subject: Option<LooseSubject>,
+    updated_at: Option<String>,
+}
+#[derive(Debug, serde::Deserialize)]
+struct LooseRepo {
+    full_name: Option<String>,
+}
+#[derive(Debug, serde::Deserialize)]
+struct LooseSubject {
+    title: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    state: Option<String>,
+    html_url: Option<String>,
+    url: Option<String>,
+}
+// `forgejo_api::impl_from_response!` would do this, but it references the `soft_assert` crate
+// unqualified (a macro-hygiene gap), so it can't expand outside `forgejo-api`. Hand-roll it.
+impl forgejo_api::FromResponse for LooseNotification {
+    fn from_response(
+        response: forgejo_api::ApiResponse,
+        has_body: bool,
+    ) -> Result<Self, forgejo_api::StructureError> {
+        if !has_body {
+            return Err(forgejo_api::StructureError::EmptyResponse);
+        }
+        serde_json::from_slice(response.body()).map_err(|e| forgejo_api::StructureError::Serde {
+            e,
+            contents: response.body().clone(),
+        })
+    }
+}
+
+/// A slimmed notification thread (the raw form embeds a full repository object each).
+#[derive(Debug, Serialize)]
+struct NotificationSummary {
+    id: Option<i64>,
+    unread: Option<bool>,
+    repo: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    state: Option<String>,
+    title: Option<String>,
+    url: Option<String>,
+    updated_at: Option<String>,
+}
+
+fn summarize_notification(n: LooseNotification) -> NotificationSummary {
+    let subject = n.subject;
+    NotificationSummary {
+        id: n.id,
+        unread: n.unread,
+        repo: n.repository.and_then(|r| r.full_name),
+        kind: subject.as_ref().and_then(|s| s.kind.clone()),
+        state: subject.as_ref().and_then(|s| s.state.clone()),
+        title: subject.as_ref().and_then(|s| s.title.clone()),
+        url: subject
+            .as_ref()
+            .and_then(|s| s.html_url.clone().or_else(|| s.url.clone())),
+        updated_at: n.updated_at,
+    }
+}
+
+/// Lists the user's notification threads (unread by default; `all` includes read ones).
+pub async fn list_notifications(
+    forgejo: &Forgejo,
+    params: ListNotificationsParams,
+) -> Result<CallToolResult, McpError> {
+    let query = NotifyGetListQuery {
+        all: params.all,
+        ..NotifyGetListQuery::default()
+    };
+    // `response_type` swaps the strict `(headers, Vec<NotificationThread>)` for our loose
+    // `Vec<LooseNotification>` (so `total` is unavailable — hence `None` below).
+    let mut req = forgejo
+        .notify_get_list(query)
+        .response_type::<Vec<LooseNotification>>();
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    let threads = req.await.map_err(to_mcp)?;
+    let items: Vec<NotificationSummary> = threads.into_iter().map(summarize_notification).collect();
     paged_result(params.page, params.limit, None, &items)
 }
 

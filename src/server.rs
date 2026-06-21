@@ -238,6 +238,26 @@ impl ForgejoMcp {
         tools::search_repos(&self.forgejo, params).await
     }
 
+    /// Lists the organizations the user belongs to.
+    #[tool(description = "List the organizations you belong to (optional page/limit)")]
+    async fn list_orgs(
+        &self,
+        Parameters(params): Parameters<tools::PageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_orgs(&self.forgejo, params).await
+    }
+
+    /// Lists the user's notification threads.
+    #[tool(
+        description = "List your notification threads (unread by default; pass all=true for read+unread). Optional page/limit"
+    )]
+    async fn list_notifications(
+        &self,
+        Parameters(params): Parameters<tools::ListNotificationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_notifications(&self.forgejo, params).await
+    }
+
     // --- write mode (deliberate, time-boxed elevation) ---
 
     /// Reports write-mode status (always available).

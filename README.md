@@ -85,6 +85,8 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_issues` / `get_issue` | ✅ read | Issues in `owner/repo` (open by default) |
 | `list_pull_requests` / `get_pull_request` | ✅ read | Pull requests in `owner/repo` (open by default) |
 | `search_repos` | ✅ read | Repository search by keyword |
+| `list_orgs` | ✅ read | Organizations you belong to |
+| `list_notifications` | ✅ read | Your notification threads, slimmed (`all=true` for read+unread) |
 | `write_status` | ✅ read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` | ✅ | Enter/leave the time-boxed write mode |
 | `create_repo` | ✅ **write** | Create a repo (defaults to private) |

@@ -101,6 +101,8 @@ token-broker process, which is out of scope.
 | `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default). |
 | `get_pull_request` | **done** | One pull request by number. |
 | `search_repos` | **done** | Search repositories by keyword. |
+| `list_orgs` | **done** | Organizations the user belongs to. |
+| `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
 
 Each tool returns the relevant `forgejo-api` struct(s) serialized as pretty JSON.
 
@@ -110,6 +112,13 @@ invalid `state` is rejected with `invalid_params` before any request is made. Ea
 returns a `{ page, limit, returned, total, items }` envelope (the `total` comes from the
 endpoint's count header — `CountHeader`), so the caller can tell whether more pages remain.
 `search_repos` reports `total: null` (its `SearchResults` carries no count).
+
+`list_notifications` returns **slimmed** summaries (`id`, `repo`, `type`, `state`, `title`,
+`unread`, `url`, `updated_at`) — the raw threads embed a full repository object each. It also
+deserializes into a **loose** local type via `forgejo-api`'s `response_type`, because the
+crate's strict `StateType` enum lacks `merged`, which would otherwise fail any page
+containing a merged-PR notification. (`total: null` there too, since that swaps out the count
+header.)
 
 **Limitations (planned refinements):** sort order and the other upstream query filters
 (labels, milestones, author, …) aren't exposed yet, and the per-item output is the full
