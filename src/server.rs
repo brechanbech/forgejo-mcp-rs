@@ -258,6 +258,17 @@ impl ForgejoMcp {
         tools::list_notifications(&self.forgejo, params).await
     }
 
+    /// Lists the comments on an issue or pull request.
+    #[tool(
+        description = "List the comments on an issue or pull request (owner/repo/index; optional page/limit)"
+    )]
+    async fn list_issue_comments(
+        &self,
+        Parameters(params): Parameters<tools::ListCommentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_issue_comments(&self.forgejo, params).await
+    }
+
     // --- write mode (deliberate, time-boxed elevation) ---
 
     /// Reports write-mode status (always available).
@@ -339,6 +350,21 @@ impl ForgejoMcp {
     ) -> Result<CallToolResult, McpError> {
         let client = self.write_client()?;
         let mut result = tools::create_issue(client, params).await?;
+        self.extend_window();
+        result.content.push(Content::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Adds a comment to an issue or pull request.
+    #[tool(
+        description = "Comment on an issue or pull request (owner/repo/index/body; requires write mode)"
+    )]
+    async fn comment_on_issue(
+        &self,
+        Parameters(params): Parameters<tools::CommentOnIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::comment_on_issue(client, params).await?;
         self.extend_window();
         result.content.push(Content::text(self.window_note()));
         Ok(result)

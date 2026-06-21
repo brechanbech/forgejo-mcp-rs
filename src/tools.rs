@@ -5,9 +5,9 @@
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
 
 use forgejo_api::structs::{
-    CreateIssueOption, CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState,
-    NotifyGetListQuery, RepoListPullRequestsQuery, RepoListPullRequestsQueryState, RepoSearchQuery,
-    UserCurrentListReposQuery,
+    Comment, CreateIssueCommentOption, CreateIssueOption, CreateRepoOption, IssueGetCommentsQuery,
+    IssueListIssuesQuery, IssueListIssuesQueryState, NotifyGetListQuery, RepoListPullRequestsQuery,
+    RepoListPullRequestsQueryState, RepoSearchQuery, UserCurrentListReposQuery,
 };
 use forgejo_api::{ApiErrorKind, CountHeader, Forgejo, ForgejoError};
 use rmcp::ErrorData as McpError;
@@ -372,6 +372,65 @@ pub async fn list_notifications(
     paged_result(params.page, params.limit, None, &items)
 }
 
+/// A slimmed issue/PR comment (the raw form embeds a full user object each).
+#[derive(Debug, Serialize)]
+struct CommentSummary {
+    id: Option<i64>,
+    user: Option<String>,
+    body: Option<String>,
+    created_at: Option<String>,
+    url: Option<String>,
+}
+
+fn summarize_comment(c: Comment) -> CommentSummary {
+    CommentSummary {
+        id: c.id,
+        user: c.user.and_then(|u| u.login),
+        body: c.body,
+        created_at: c.created_at.map(|d| d.to_string()),
+        url: c.html_url.map(|u| u.to_string()),
+    }
+}
+
+/// Parameters for the `list_issue_comments` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListCommentsParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue or pull-request number.
+    pub index: i64,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Lists the comments on an issue or pull request.
+pub async fn list_issue_comments(
+    forgejo: &Forgejo,
+    params: ListCommentsParams,
+) -> Result<CallToolResult, McpError> {
+    let mut req = forgejo.issue_get_comments(
+        &params.owner,
+        &params.repo,
+        params.index,
+        IssueGetCommentsQuery::default(),
+    );
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    let (headers, comments) = req.await.map_err(to_mcp)?;
+    let items: Vec<CommentSummary> = comments.into_iter().map(summarize_comment).collect();
+    paged_result(params.page, params.limit, headers.count(), &items)
+}
+
 // --- write tools (require write mode; see crate::server) ---
 
 /// Parameters for the `enable_write_mode` tool.
@@ -489,4 +548,33 @@ pub async fn create_issue(
         .await
         .map_err(to_mcp)?;
     json_result(&issue)
+}
+
+/// Parameters for the `comment_on_issue` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommentOnIssueParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue or pull-request number.
+    pub index: i64,
+    /// Comment body (Markdown).
+    pub body: String,
+}
+
+/// Adds a comment to an issue or pull request.
+pub async fn comment_on_issue(
+    forgejo: &Forgejo,
+    params: CommentOnIssueParams,
+) -> Result<CallToolResult, McpError> {
+    let option = CreateIssueCommentOption {
+        body: params.body,
+        updated_at: None,
+    };
+    let comment = forgejo
+        .issue_create_comment(&params.owner, &params.repo, params.index, option)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&summarize_comment(comment))
 }

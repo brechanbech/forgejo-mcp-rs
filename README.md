@@ -87,10 +87,12 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `search_repos` | ✅ read | Repository search by keyword |
 | `list_orgs` | ✅ read | Organizations you belong to |
 | `list_notifications` | ✅ read | Your notification threads, slimmed (`all=true` for read+unread) |
+| `list_issue_comments` | ✅ read | Comments on an issue/PR (slimmed) |
 | `write_status` | ✅ read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` | ✅ | Enter/leave the time-boxed write mode |
 | `create_repo` | ✅ **write** | Create a repo (defaults to private) |
 | `create_issue` | ✅ **write** | Create an issue (owner/repo/title, optional body) |
+| `comment_on_issue` | ✅ **write** | Comment on an issue/PR (owner/repo/index/body) |
 | `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`, and

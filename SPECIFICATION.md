@@ -103,6 +103,7 @@ token-broker process, which is out of scope.
 | `search_repos` | **done** | Search repositories by keyword. |
 | `list_orgs` | **done** | Organizations the user belongs to. |
 | `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
+| `list_issue_comments` | **done** | Comments on an issue/PR, slimmed. |
 
 Each tool returns the relevant `forgejo-api` struct(s) serialized as pretty JSON.
 
@@ -135,6 +136,7 @@ Require `FORGEJO_TOKEN_WRITE` + active write mode (see the security model).
 | `disable_write_mode` | **done** | Return to read-only immediately. |
 | `create_repo` | **done** | Create a repo for the authenticated user (defaults to private). |
 | `create_issue` | **done** | Create an issue in `owner/repo` (title required, optional body). |
+| `comment_on_issue` | **done** | Comment on an issue/PR (`owner/repo/index/body`). |
 | `delete_repo` | **done** | Delete a repo (guarded by an exact `owner/repo` `confirm`). |
 
 **Deferred:** `edit_repo` (rename/visibility/archive) — `EditRepoOption` has 20+ no-`Default`
@@ -167,6 +169,17 @@ a real client) so slow responses can return.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
 - No webhooks, admin, or CI-control tooling in v0.1.
+
+### Tried and dropped: CI status
+
+A `ci_status` ("did my CI pass?") tool was attempted and removed — **Codeberg's API can't
+deliver it usefully today**. The combined commit-status endpoint
+(`repo_get_combined_status_by_ref`) returns an empty `state: ""` / `total_count: 0` for
+Forgejo-Actions repos (Actions don't populate commit statuses), and the Actions-runs
+endpoints (`/actions/runs`, `/actions/tasks`) 404 on Codeberg's Forgejo version. So there is
+no API that reports a Forgejo-Actions run's pass/fail. Revisit if/when Codeberg exposes the
+Actions-runs API. (Aside: the empty `state: ""` also can't deserialize into `forgejo-api`'s
+`CommitStatusState` — a third strict-enum gap, alongside the `merged`-state one in #159.)
 
 ## Milestones
 
