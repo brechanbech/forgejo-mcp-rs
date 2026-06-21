@@ -68,16 +68,21 @@ impl ForgejoMcp {
     }
 
     /// Lists the authenticated user's repositories.
-    #[tool(description = "List the authenticated user's repositories")]
-    async fn list_my_repos(&self) -> Result<CallToolResult, McpError> {
-        tools::list_my_repos(&self.forgejo).await
+    #[tool(description = "List the authenticated user's repositories (optional page/limit)")]
+    async fn list_my_repos(
+        &self,
+        Parameters(params): Parameters<tools::PageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_my_repos(&self.forgejo, params).await
     }
 
     /// Lists issues in a repository.
-    #[tool(description = "List issues in a repository (owner/repo); open issues by default")]
+    #[tool(
+        description = "List issues in a repository (owner/repo); optional state (open/closed/all) and page/limit"
+    )]
     async fn list_issues(
         &self,
-        Parameters(params): Parameters<tools::RepoRef>,
+        Parameters(params): Parameters<tools::ListItemsParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::list_issues(&self.forgejo, params).await
     }
@@ -92,10 +97,12 @@ impl ForgejoMcp {
     }
 
     /// Lists pull requests in a repository.
-    #[tool(description = "List pull requests in a repository (owner/repo); open by default")]
+    #[tool(
+        description = "List pull requests in a repository (owner/repo); optional state (open/closed/all) and page/limit"
+    )]
     async fn list_pull_requests(
         &self,
-        Parameters(params): Parameters<tools::RepoRef>,
+        Parameters(params): Parameters<tools::ListItemsParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::list_pull_requests(&self.forgejo, params).await
     }
@@ -110,7 +117,7 @@ impl ForgejoMcp {
     }
 
     /// Searches repositories.
-    #[tool(description = "Search repositories by keyword")]
+    #[tool(description = "Search repositories by keyword (optional page/limit)")]
     async fn search_repos(
         &self,
         Parameters(params): Parameters<tools::SearchReposParams>,

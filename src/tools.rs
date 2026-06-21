@@ -5,7 +5,8 @@
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
 
 use forgejo_api::structs::{
-    IssueListIssuesQuery, RepoListPullRequestsQuery, RepoSearchQuery, UserCurrentListReposQuery,
+    IssueListIssuesQuery, IssueListIssuesQueryState, RepoListPullRequestsQuery,
+    RepoListPullRequestsQueryState, RepoSearchQuery, UserCurrentListReposQuery,
 };
 use forgejo_api::{ApiErrorKind, Forgejo, ForgejoError};
 use rmcp::ErrorData as McpError;
@@ -47,15 +48,6 @@ pub async fn whoami(forgejo: &Forgejo) -> Result<CallToolResult, McpError> {
     json_result(&user)
 }
 
-/// A repository, by owner and name.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RepoRef {
-    /// Repository owner — user or organization, e.g. `brechanbech`.
-    pub owner: String,
-    /// Repository name, e.g. `forgejo-mcp-rs`.
-    pub repo: String,
-}
-
 /// An item within a repository addressed by number (an issue or pull-request index).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RepoItemRef {
@@ -67,29 +59,108 @@ pub struct RepoItemRef {
     pub index: i64,
 }
 
+/// Parameters for listing issues or pull requests in a repository.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListItemsParams {
+    /// Repository owner — user or organization, e.g. `brechanbech`.
+    pub owner: String,
+    /// Repository name, e.g. `forgejo-mcp-rs`.
+    pub repo: String,
+    /// Filter by state: `open` (default), `closed`, or `all`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Pagination-only parameters (for listings without a state).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PageParams {
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
 /// Parameters for the `search_repos` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchReposParams {
     /// Search query (keywords; matches repository names and, by default, descriptions).
     pub query: String,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
-/// Lists the authenticated user's repositories (first page).
-pub async fn list_my_repos(forgejo: &Forgejo) -> Result<CallToolResult, McpError> {
+/// Parses a state filter (`open`/`closed`/`all`) for issues, or a clear `invalid_params`.
+fn issue_state(state: &str) -> Result<IssueListIssuesQueryState, McpError> {
+    match state.to_ascii_lowercase().as_str() {
+        "open" => Ok(IssueListIssuesQueryState::Open),
+        "closed" => Ok(IssueListIssuesQueryState::Closed),
+        "all" => Ok(IssueListIssuesQueryState::All),
+        other => Err(McpError::invalid_params(
+            format!("state must be open, closed, or all (got '{other}')"),
+            None,
+        )),
+    }
+}
+
+/// Parses a state filter (`open`/`closed`/`all`) for pull requests.
+fn pr_state(state: &str) -> Result<RepoListPullRequestsQueryState, McpError> {
+    match state.to_ascii_lowercase().as_str() {
+        "open" => Ok(RepoListPullRequestsQueryState::Open),
+        "closed" => Ok(RepoListPullRequestsQueryState::Closed),
+        "all" => Ok(RepoListPullRequestsQueryState::All),
+        other => Err(McpError::invalid_params(
+            format!("state must be open, closed, or all (got '{other}')"),
+            None,
+        )),
+    }
+}
+
+/// Lists the authenticated user's repositories.
+pub async fn list_my_repos(
+    forgejo: &Forgejo,
+    params: PageParams,
+) -> Result<CallToolResult, McpError> {
     // The list endpoints return `(pagination headers, items)`; we surface just the items.
-    let (_, repos) = forgejo
-        .user_current_list_repos(UserCurrentListReposQuery::default())
-        .await
-        .map_err(to_mcp)?;
+    let mut req = forgejo.user_current_list_repos(UserCurrentListReposQuery::default());
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    let (_, repos) = req.await.map_err(to_mcp)?;
     json_result(&repos)
 }
 
 /// Lists issues in `owner/repo` (open issues by default).
-pub async fn list_issues(forgejo: &Forgejo, params: RepoRef) -> Result<CallToolResult, McpError> {
-    let (_, issues) = forgejo
-        .issue_list_issues(&params.owner, &params.repo, IssueListIssuesQuery::default())
-        .await
-        .map_err(to_mcp)?;
+pub async fn list_issues(
+    forgejo: &Forgejo,
+    params: ListItemsParams,
+) -> Result<CallToolResult, McpError> {
+    let query = IssueListIssuesQuery {
+        state: params.state.as_deref().map(issue_state).transpose()?,
+        ..IssueListIssuesQuery::default()
+    };
+    let mut req = forgejo.issue_list_issues(&params.owner, &params.repo, query);
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    let (_, issues) = req.await.map_err(to_mcp)?;
     json_result(&issues)
 }
 
@@ -105,16 +176,20 @@ pub async fn get_issue(forgejo: &Forgejo, params: RepoItemRef) -> Result<CallToo
 /// Lists pull requests in `owner/repo` (open by default).
 pub async fn list_pull_requests(
     forgejo: &Forgejo,
-    params: RepoRef,
+    params: ListItemsParams,
 ) -> Result<CallToolResult, McpError> {
-    let (_, prs) = forgejo
-        .repo_list_pull_requests(
-            &params.owner,
-            &params.repo,
-            RepoListPullRequestsQuery::default(),
-        )
-        .await
-        .map_err(to_mcp)?;
+    let query = RepoListPullRequestsQuery {
+        state: params.state.as_deref().map(pr_state).transpose()?,
+        ..RepoListPullRequestsQuery::default()
+    };
+    let mut req = forgejo.repo_list_pull_requests(&params.owner, &params.repo, query);
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    let (_, prs) = req.await.map_err(to_mcp)?;
     json_result(&prs)
 }
 
@@ -139,6 +214,13 @@ pub async fn search_repos(
         q: Some(params.query),
         ..RepoSearchQuery::default()
     };
-    let results = forgejo.repo_search(query).await.map_err(to_mcp)?;
+    let mut req = forgejo.repo_search(query);
+    if let Some(page) = params.page {
+        req = req.page(page);
+    }
+    if let Some(limit) = params.limit {
+        req = req.page_size(limit);
+    }
+    let results = req.await.map_err(to_mcp)?;
     json_result(&results)
 }

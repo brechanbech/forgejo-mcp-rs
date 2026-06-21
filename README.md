@@ -7,9 +7,10 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for
 an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
 repositories, issues, and pull requests — over the Forgejo REST API.
 
-> Status: **v0.1, read-only.** Seven read tools — the authenticated user, repositories,
-> issues, pull requests, and repository search — over the Forgejo REST API. See
-> [`SPECIFICATION.md`](SPECIFICATION.md) for the full plan; writes land in v0.2.
+> Status: **v0.1.0, read-only.** Seven read tools — the authenticated user, repositories,
+> issues, pull requests, and repository search (with `state`/pagination filters) — over the
+> Forgejo REST API. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full plan; writes
+> land in v0.2.
 
 It's a thin tool layer over the [`forgejo-api`](https://crates.io/crates/forgejo-api) crate
 (a maintained, typed Forgejo client) — an **independent implementation over the documented
@@ -69,8 +70,9 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_pull_requests` / `get_pull_request` | ✅ | Pull requests in `owner/repo` (open by default) |
 | `search_repos` | ✅ | Repository search by keyword |
 
-The list tools use default queries (first page, open items) — state/pagination/sort filters
-aren't exposed yet. Write tools (create issue / comment) are deferred to v0.2 — see the
+The list tools accept optional `state` (`open`/`closed`/`all`, on issues/PRs) and
+`page`/`limit` pagination; sort order and other upstream filters aren't exposed yet. Write
+tools (create issue / comment) are deferred to v0.2 — see the
 [specification](SPECIFICATION.md).
 
 ## Security

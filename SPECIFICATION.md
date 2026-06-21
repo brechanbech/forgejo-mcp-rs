@@ -74,9 +74,13 @@ The server refuses to start without `FORGEJO_TOKEN`, with a clear message.
 
 Each tool returns the relevant `forgejo-api` struct(s) serialized as pretty JSON.
 
-**v0.1 limitations (planned refinements):** the list tools use default queries — no
-state (open/closed/all), pagination, or sort parameters are exposed yet, and only the first
-page is returned. Output is the full upstream struct(s), not slimmed summaries.
+The list tools accept optional `state` (`open`/`closed`/`all`, on issues and pull requests)
+and `page` / `limit` pagination (via `forgejo-api`'s `Request::page` / `page_size`). An
+invalid `state` is rejected with `invalid_params` before any request is made.
+
+**v0.1 limitations (planned refinements):** sort order and the other upstream query filters
+(labels, milestones, author, …) aren't exposed yet, and output is the full upstream
+struct(s), not slimmed summaries.
 
 ### v0.2 — writes (not yet built)
 
