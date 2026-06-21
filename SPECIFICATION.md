@@ -19,20 +19,24 @@ of any existing server.
 
 ## Architecture
 
-A single binary crate — a thin tool layer over the [`forgejo-api`](https://crates.io/crates/forgejo-api)
-crate (a maintained, typed, swagger-generated Forgejo client). No bespoke HTTP code.
+A single binary crate. The tool layer sits over a small, in-house Forgejo REST client
+(`src/forge/`) built on `reqwest` — the ~14 endpoints we touch, no third-party forge SDK.
 
 ```
-forgejo-api   →  typed Forgejo client (auth, endpoints, pagination)   ← upstream
+forge::Forge   →  in-house REST client (auth, ~14 endpoints, pagination)  ← src/forge/
    ↑
-forgejo-mcp-rs  →  #[tool] methods mapping to the calls we use         ← this crate
+forgejo-mcp-rs  →  #[tool] methods mapping to the calls we use            ← this crate
 ```
 
 - `src/main.rs` — `#[tokio::main]`; logs to **stderr** (stdout is the MCP stdio transport);
   builds the server from the environment; serves over stdio.
-- `src/server.rs` — `ForgejoMcp { tool_router, forgejo: Arc<Forgejo> }`; `from_env()`;
+- `src/forge/` — `Forge`, the REST client: base-URL/`api/v1` joining, a zeroized token sent as
+  `Authorization: token …`, one `request()` helper, and a typed method per endpoint returning
+  raw JSON (`serde_json::Value`). `error.rs` holds `ForgeError` (config / transport / non-2xx
+  status / decode), which knows whether a failure is the caller's (4xx) or ours.
+- `src/server.rs` — `ForgejoMcp { tool_router, forgejo: Arc<Forge> }`; `from_env()`;
   the `#[tool_router]` block; the `ServerHandler` with instructions.
-- `src/tools.rs` — `to_mcp(ForgejoError)` error mapping and the tool functions; the server's
+- `src/tools.rs` — `to_mcp(ForgeError)` error mapping and the tool functions; the server's
   `#[tool]` methods delegate here. (Promoted to a `tools/` directory once it grows.)
 
 Built on `rmcp 1.7`. Conventions (lints, CI, pre-push, deny/clippy config) mirror the
@@ -58,7 +62,8 @@ a scope check.
 ## Security model
 
 - Tokens are read **from the environment only** — never a CLI argument, never written to a
-  file, never logged. `forgejo-api` zeroizes them after building request headers.
+  file, never logged. The client keeps the token in a `Zeroizing<String>` (wiped on drop) and
+  marks the `Authorization` header value sensitive so it stays out of any debug output.
 - **Read-only by default.** Reads use `FORGEJO_TOKEN`. Writes use a *separate*
   `FORGEJO_TOKEN_WRITE`; if it isn't configured, the write tools refuse permanently — so
   *providing the second token is the opt-in* to any destructive capability.
@@ -105,25 +110,27 @@ token-broker process, which is out of scope.
 | `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
 | `list_issue_comments` | **done** | Comments on an issue/PR, slimmed. |
 
-Each tool returns the relevant `forgejo-api` struct(s) serialized as pretty JSON.
+Each tool returns the relevant Forgejo API JSON, pretty-printed. Full-resource endpoints pass
+the raw response straight through; the slimmed tools (notifications, comments) reshape it.
 
 The list tools accept optional `state` (`open`/`closed`/`all`, on issues and pull requests)
-and `page` / `limit` pagination (via `forgejo-api`'s `Request::page` / `page_size`). An
-invalid `state` is rejected with `invalid_params` before any request is made. Each list tool
-returns a `{ page, limit, returned, total, items }` envelope (the `total` comes from the
-endpoint's count header — `CountHeader`), so the caller can tell whether more pages remain.
-`search_repos` reports `total: null` (its `SearchResults` carries no count).
+and `page` / `limit` pagination (sent as query parameters). An invalid `state` is rejected
+with `invalid_params` before any request is made. Each list tool returns a
+`{ page, limit, returned, total, items }` envelope; `total` comes from the endpoint's
+`X-Total-Count` header (the client parses it when present), so the caller can tell whether
+more pages remain. `search_repos`, `list_orgs`, and `list_notifications` report `total: null`
+(those endpoints send no count header).
 
 `list_notifications` returns **slimmed** summaries (`id`, `repo`, `type`, `state`, `title`,
-`unread`, `url`, `updated_at`) — the raw threads embed a full repository object each. It also
-deserializes into a **loose** local type via `forgejo-api`'s `response_type`, because the
-crate's strict `StateType` enum lacks `merged`, which would otherwise fail any page
-containing a merged-PR notification. (`total: null` there too, since that swaps out the count
-header.)
+`unread`, `url`, `updated_at`) — the raw threads embed a full repository object each. We
+deserialize each thread into a **loose** local struct that keeps the volatile fields (notably
+`state`) as plain strings, so a value like a merged-PR notification can't break the parse.
+Because we own the response shape, there is no strict-enum gap to work around. Comments are
+slimmed the same way.
 
-**Limitations (planned refinements):** sort order and the other upstream query filters
-(labels, milestones, author, …) aren't exposed yet, and the per-item output is the full
-upstream struct, not a slimmed summary.
+**Limitations (planned refinements):** sort order and the other query filters (labels,
+milestones, author, …) aren't exposed yet, and the per-item output of the passthrough list
+tools is the full API object, not a slimmed summary.
 
 ### v0.2 — write mode & repo management
 
@@ -145,9 +152,9 @@ issue/PR writes are also future work.
 
 ## Error handling
 
-`forgejo-api` errors map to MCP errors in `tools::to_mcp`: an HTTP 4xx (bad token, not found,
-bad request) becomes `invalid_params` (the caller's problem); everything else becomes
-`internal_error`.
+`ForgeError`s map to MCP errors in `tools::to_mcp`, keyed off `ForgeError::is_caller_error`:
+an HTTP 4xx (bad token, not found, bad request) becomes `invalid_params` (the caller's
+problem); config, transport, 5xx, and decode failures become `internal_error`.
 
 ## Concurrency & testing
 
@@ -164,8 +171,8 @@ a real client) so slow responses can return.
 
 ## Non-goals
 
-- Not a full Forgejo SDK — only the read surface the assistant needs. `forgejo-api` is the
-  SDK; this crate is the MCP adaptor.
+- Not a full Forgejo SDK — the in-house `forge` client covers only the ~14 endpoints the
+  assistant needs, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
 - No webhooks, admin, or CI-control tooling in v0.1.
@@ -178,31 +185,25 @@ deliver it usefully today**. The combined commit-status endpoint
 Forgejo-Actions repos (Actions don't populate commit statuses), and the Actions-runs
 endpoints (`/actions/runs`, `/actions/tasks`) 404 on Codeberg's Forgejo version. So there is
 no API that reports a Forgejo-Actions run's pass/fail. Revisit if/when Codeberg exposes the
-Actions-runs API. (Aside: the empty `state: ""` also can't deserialize into `forgejo-api`'s
-`CommitStatusState` — a third strict-enum gap, alongside the `merged`-state one in #159.)
+Actions-runs API. (Aside: that empty `state: ""` is exactly the sort of value a strict typed
+client rejects; our loose parsing wouldn't choke on it, but there's still no useful status to
+return.)
 
-### Upstream (`forgejo-api`) relationship
+### Why the in-house client (dropping `forgejo-api`)
 
-We hit three real, AI-independent gaps in `forgejo-api`: `StateType` has no `merged`,
-`CommitStatusState` rejects the empty `state: ""`, and `impl_from_response!` references the
-`soft_assert` crate unqualified (a macro-hygiene gap that blocks expansion outside the crate).
-The upstream issue reporting these was **closed (won't-fix)** — the maintainer doesn't accept
-AI-tooling-related contributions. That's their call on their repo, and we leave it there.
+Through v0.5, this crate was a thin layer over [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api).
+We hit three real, AI-independent gaps in it: `StateType` has no `merged`, `CommitStatusState`
+rejects the empty `state: ""`, and `impl_from_response!` references the `soft_assert` crate
+unqualified (a macro-hygiene gap that blocks expansion outside the crate). The upstream issue
+reporting these was closed won't-fix — the maintainer doesn't accept AI-tooling-related
+contributions, which is their call to make.
 
-All three gaps are already worked around **in-tree**, from outside the crate: loose
-deserialize via `Request::response_type` plus a hand-rolled `FromResponse` (see
-`tools::LooseNotification`). So nothing forces a fork today.
-
-The plan, in order:
-
-1. **Now** — keep the in-tree workarounds; depend on `forgejo-api` from the registry.
-2. **If blocked** — only if we hit something that *can't* be worked around externally (a
-   private field, or an endpoint with no `response_type` escape hatch), fork `forgejo-api`
-   (Apache-2.0 OR MIT — clean), carry the *minimal* patch, and point Cargo at it via
-   `[patch.crates-io]`. Drop the patch the day upstream or a community fork fixes it.
-
-A full hard fork (owning the whole client + tracking upstream forever) is deliberately *not*
-the plan — too much surface for a thin MCP adaptor to carry over a few small patches.
+Rather than fork and carry patches against a crate whose author would prefer not to be part of
+this, we removed the dependency. The tool surface only touches ~14 endpoints, all plain JSON,
+and we were already reshaping much of the output into local types — so a small `reqwest`-based
+client (`src/forge/`) is a proportionate replacement that we fully own and can audit. The
+strict-enum gaps simply don't exist when we define the response shapes ourselves (loose where
+it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dependency tree.
 
 ## Milestones
 

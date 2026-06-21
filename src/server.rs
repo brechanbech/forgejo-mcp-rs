@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use forgejo_api::{Auth, Forgejo};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use url::Url;
 
+use crate::forge::Forge;
 use crate::tools;
 
 /// Default Forgejo instance — Codeberg.
@@ -32,9 +32,9 @@ const MAX_WRITE_MINUTES: u64 = 60;
 pub struct ForgejoMcp {
     tool_router: ToolRouter<Self>,
     /// Read-only client (always present).
-    forgejo: Arc<Forgejo>,
+    forgejo: Arc<Forge>,
     /// Write client — present only if `FORGEJO_TOKEN_WRITE` was configured.
-    write: Option<Arc<Forgejo>>,
+    write: Option<Arc<Forge>>,
     /// Active write-mode window as `(expires_at, window_length)`; `None` = read mode.
     write_state: Arc<Mutex<Option<(Instant, Duration)>>>,
     /// Default window length used by `enable_write_mode` when no `minutes` is given.
@@ -67,13 +67,14 @@ impl ForgejoMcp {
             std::env::var("FORGEJO_TOKEN").ok(),
             std::env::var("FORGEJO_TOKEN_WRITE").ok(),
         )?;
-        let forgejo = Forgejo::new(Auth::Token(&read_token), url.clone())
+        let forgejo = Forge::new(&url, &read_token)
             .map_err(|e| anyhow::anyhow!("building the read client: {e}"))?;
         let write = match write_token {
-            Some(wt) => Some(Arc::new(
-                Forgejo::new(Auth::Token(&wt), url)
-                    .map_err(|e| anyhow::anyhow!("building the write client: {e}"))?,
-            )),
+            Some(wt) => {
+                Some(Arc::new(Forge::new(&url, &wt).map_err(|e| {
+                    anyhow::anyhow!("building the write client: {e}")
+                })?))
+            }
             None => None,
         };
 
@@ -94,7 +95,7 @@ impl ForgejoMcp {
 
     /// The write client, but only while write mode is active; otherwise a clear error
     /// explaining how to proceed (no write token, or not elevated).
-    fn write_client(&self) -> Result<&Forgejo, McpError> {
+    fn write_client(&self) -> Result<&Forge, McpError> {
         let Some(client) = self.write.as_deref() else {
             return Err(McpError::invalid_params(
                 "read-only: no FORGEJO_TOKEN_WRITE is configured for this server".to_owned(),
@@ -413,8 +414,7 @@ impl ServerHandler for ForgejoMcp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Auth, Duration, ForgejoMcp, Instant, Mutex, Url, resolve_tokens};
-    use forgejo_api::Forgejo;
+    use super::{Arc, Duration, Forge, ForgejoMcp, Instant, Mutex, Url, resolve_tokens};
 
     #[test]
     fn read_token_is_required() {
@@ -454,8 +454,8 @@ mod tests {
     /// A server with dummy clients (no network is touched by the gating logic under test).
     fn server(with_write: bool) -> ForgejoMcp {
         let url = Url::parse("https://codeberg.org").unwrap();
-        let read = Arc::new(Forgejo::new(Auth::Token("ro"), url.clone()).unwrap());
-        let write = with_write.then(|| Arc::new(Forgejo::new(Auth::Token("rw"), url).unwrap()));
+        let read = Arc::new(Forge::new(&url, "ro").unwrap());
+        let write = with_write.then(|| Arc::new(Forge::new(&url, "rw").unwrap()));
         ForgejoMcp {
             tool_router: ForgejoMcp::tool_router(),
             forgejo: read,

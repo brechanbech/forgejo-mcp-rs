@@ -1,38 +1,47 @@
-//! Tool implementations — thin wrappers over the `forgejo-api` client.
+//! Tool implementations — thin wrappers over the in-house [`Forge`] REST client.
 //!
 //! Each function maps a Forgejo API call to a [`CallToolResult`]. The server's `#[tool]`
 //! methods in [`crate::server`] delegate here, so that file reads as an index of the
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
+//!
+//! The client returns raw API JSON ([`Value`]); full-resource endpoints pass it straight
+//! through, while list endpoints that we slim (notifications, comments) deserialize into
+//! local shapes first.
 
-use forgejo_api::structs::{
-    Comment, CreateIssueCommentOption, CreateIssueOption, CreateRepoOption, IssueGetCommentsQuery,
-    IssueListIssuesQuery, IssueListIssuesQueryState, NotifyGetListQuery, RepoListPullRequestsQuery,
-    RepoListPullRequestsQueryState, RepoSearchQuery, UserCurrentListReposQuery,
-};
-use forgejo_api::{ApiErrorKind, CountHeader, Forgejo, ForgejoError};
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
-/// Maps a `forgejo-api` error to an MCP error. Forge-level rejections (bad token, missing
-/// repo, validation, …) and any other client-side 4xx are the caller's problem
-/// (`invalid_params`); transport errors and server-side 5xx are `internal_error`.
+use crate::forge::{Forge, ForgeError};
+
+/// Maps a [`ForgeError`] to an MCP error. Caller-side rejections (bad token, missing repo,
+/// validation — any 4xx) are `invalid_params`; transport, 5xx, and decode failures are ours
+/// (`internal_error`).
 // By value so it reads as a point-free `.map_err(to_mcp)`; the body only needs a borrow.
 #[allow(clippy::needless_pass_by_value)]
-fn to_mcp(err: ForgejoError) -> McpError {
-    let caller_error = match &err {
-        // Structured API errors are almost all 4xx; only a 5xx hiding in `Other` is internal.
-        ForgejoError::ApiError(api) => {
-            !matches!(&api.kind, ApiErrorKind::Other(code) if code.is_server_error())
-        }
-        ForgejoError::UnexpectedStatusCode(code) => code.is_client_error(),
-        _ => false,
-    };
-    if caller_error {
+fn to_mcp(err: ForgeError) -> McpError {
+    if err.is_caller_error() {
         McpError::invalid_params(err.to_string(), None)
     } else {
         McpError::internal_error(err.to_string(), None)
+    }
+}
+
+/// Deserializes a raw API [`Value`] into a local shape, mapping a mismatch to an internal
+/// error (an unexpected response shape is our problem, not the caller's).
+fn decode<T: DeserializeOwned>(value: Value) -> Result<T, McpError> {
+    serde_json::from_value(value)
+        .map_err(|e| McpError::internal_error(format!("unexpected response shape: {e}"), None))
+}
+
+/// Unwraps a JSON array into its elements (anything else becomes empty).
+fn into_items(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(items) => items,
+        _ => Vec::new(),
     }
 }
 
@@ -61,13 +70,13 @@ fn paged_result<T: Serialize>(
 }
 
 /// Returns the authenticated user — proof the token works.
-pub async fn whoami(forgejo: &Forgejo) -> Result<CallToolResult, McpError> {
-    let user = forgejo.user_get_current().await.map_err(to_mcp)?;
+pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
+    let user = forge.user_get_current().await.map_err(to_mcp)?;
     json_result(&user)
 }
 
 /// An item within a repository addressed by number (an issue or pull-request index).
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct RepoItemRef {
     /// Repository owner — user or organization.
     pub owner: String,
@@ -78,7 +87,7 @@ pub struct RepoItemRef {
 }
 
 /// Parameters for listing issues or pull requests in a repository.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct ListItemsParams {
     /// Repository owner — user or organization, e.g. `brechanbech`.
     pub owner: String,
@@ -96,7 +105,7 @@ pub struct ListItemsParams {
 }
 
 /// Pagination-only parameters (for listings without a state).
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct PageParams {
     /// 1-based page number.
     #[serde(default)]
@@ -107,7 +116,7 @@ pub struct PageParams {
 }
 
 /// Parameters for the `search_repos` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct SearchReposParams {
     /// Search query (keywords; matches repository names and, by default, descriptions).
     pub query: String,
@@ -119,25 +128,13 @@ pub struct SearchReposParams {
     pub limit: Option<u32>,
 }
 
-/// Parses a state filter (`open`/`closed`/`all`) for issues, or a clear `invalid_params`.
-fn issue_state(state: &str) -> Result<IssueListIssuesQueryState, McpError> {
+/// Validates a state filter (`open`/`closed`/`all`), returning the canonical query value or a
+/// clear `invalid_params`.
+fn parse_state(state: &str) -> Result<&'static str, McpError> {
     match state.to_ascii_lowercase().as_str() {
-        "open" => Ok(IssueListIssuesQueryState::Open),
-        "closed" => Ok(IssueListIssuesQueryState::Closed),
-        "all" => Ok(IssueListIssuesQueryState::All),
-        other => Err(McpError::invalid_params(
-            format!("state must be open, closed, or all (got '{other}')"),
-            None,
-        )),
-    }
-}
-
-/// Parses a state filter (`open`/`closed`/`all`) for pull requests.
-fn pr_state(state: &str) -> Result<RepoListPullRequestsQueryState, McpError> {
-    match state.to_ascii_lowercase().as_str() {
-        "open" => Ok(RepoListPullRequestsQueryState::Open),
-        "closed" => Ok(RepoListPullRequestsQueryState::Closed),
-        "all" => Ok(RepoListPullRequestsQueryState::All),
+        "open" => Ok("open"),
+        "closed" => Ok("closed"),
+        "all" => Ok("all"),
         other => Err(McpError::invalid_params(
             format!("state must be open, closed, or all (got '{other}')"),
             None,
@@ -146,46 +143,38 @@ fn pr_state(state: &str) -> Result<RepoListPullRequestsQueryState, McpError> {
 }
 
 /// Lists the authenticated user's repositories.
-pub async fn list_my_repos(
-    forgejo: &Forgejo,
-    params: PageParams,
-) -> Result<CallToolResult, McpError> {
-    // The list endpoints return `(pagination headers, items)`; the headers carry the total.
-    let mut req = forgejo.user_current_list_repos(UserCurrentListReposQuery::default());
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    let (headers, repos) = req.await.map_err(to_mcp)?;
-    paged_result(params.page, params.limit, headers.count(), &repos)
+pub async fn list_my_repos(forge: &Forge, params: PageParams) -> Result<CallToolResult, McpError> {
+    // The list endpoints carry the full count in the `X-Total-Count` header.
+    let (repos, total) = forge
+        .list_my_repos(params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(params.page, params.limit, total, &into_items(repos))
 }
 
 /// Lists issues in `owner/repo` (open issues by default).
 pub async fn list_issues(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: ListItemsParams,
 ) -> Result<CallToolResult, McpError> {
-    let query = IssueListIssuesQuery {
-        state: params.state.as_deref().map(issue_state).transpose()?,
-        ..IssueListIssuesQuery::default()
-    };
-    let mut req = forgejo.issue_list_issues(&params.owner, &params.repo, query);
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    let (headers, issues) = req.await.map_err(to_mcp)?;
-    paged_result(params.page, params.limit, headers.count(), &issues)
+    let state = params.state.as_deref().map(parse_state).transpose()?;
+    let (issues, total) = forge
+        .list_issues(
+            &params.owner,
+            &params.repo,
+            state,
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    paged_result(params.page, params.limit, total, &into_items(issues))
 }
 
 /// Gets one issue by index.
-pub async fn get_issue(forgejo: &Forgejo, params: RepoItemRef) -> Result<CallToolResult, McpError> {
-    let issue = forgejo
-        .issue_get_issue(&params.owner, &params.repo, params.index)
+pub async fn get_issue(forge: &Forge, params: RepoItemRef) -> Result<CallToolResult, McpError> {
+    let issue = forge
+        .get_issue(&params.owner, &params.repo, params.index)
         .await
         .map_err(to_mcp)?;
     json_result(&issue)
@@ -193,31 +182,30 @@ pub async fn get_issue(forgejo: &Forgejo, params: RepoItemRef) -> Result<CallToo
 
 /// Lists pull requests in `owner/repo` (open by default).
 pub async fn list_pull_requests(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: ListItemsParams,
 ) -> Result<CallToolResult, McpError> {
-    let query = RepoListPullRequestsQuery {
-        state: params.state.as_deref().map(pr_state).transpose()?,
-        ..RepoListPullRequestsQuery::default()
-    };
-    let mut req = forgejo.repo_list_pull_requests(&params.owner, &params.repo, query);
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    let (headers, prs) = req.await.map_err(to_mcp)?;
-    paged_result(params.page, params.limit, headers.count(), &prs)
+    let state = params.state.as_deref().map(parse_state).transpose()?;
+    let (prs, total) = forge
+        .list_pull_requests(
+            &params.owner,
+            &params.repo,
+            state,
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    paged_result(params.page, params.limit, total, &into_items(prs))
 }
 
 /// Gets one pull request by index.
 pub async fn get_pull_request(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: RepoItemRef,
 ) -> Result<CallToolResult, McpError> {
-    let pr = forgejo
-        .repo_get_pull_request(&params.owner, &params.repo, params.index)
+    let pr = forge
+        .get_pull_request(&params.owner, &params.repo, params.index)
         .await
         .map_err(to_mcp)?;
     json_result(&pr)
@@ -225,43 +213,34 @@ pub async fn get_pull_request(
 
 /// Searches repositories by keyword.
 pub async fn search_repos(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: SearchReposParams,
 ) -> Result<CallToolResult, McpError> {
-    let query = RepoSearchQuery {
-        q: Some(params.query),
-        ..RepoSearchQuery::default()
+    // `repo_search` returns `{ ok, data }` (no count header), so `total` is unknown here —
+    // surface `data` in the same envelope for consistency.
+    let results = forge
+        .search_repos(&params.query, params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    let items = match results {
+        Value::Object(mut map) => into_items(map.remove("data").unwrap_or(Value::Null)),
+        _ => Vec::new(),
     };
-    let mut req = forgejo.repo_search(query);
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    // `repo_search` returns `SearchResults { data, ok }` (no count header), so `total` is
-    // unknown here — surface the items in the same envelope for consistency.
-    let results = req.await.map_err(to_mcp)?;
-    let items = results.data.unwrap_or_default();
     paged_result(params.page, params.limit, None, &items)
 }
 
 /// Lists the organizations the authenticated user belongs to.
-pub async fn list_orgs(forgejo: &Forgejo, params: PageParams) -> Result<CallToolResult, McpError> {
-    let mut req = forgejo.org_list_current_user_orgs();
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    // Returns `Vec<Organization>` (no count header), so `total` is unknown here.
-    let orgs = req.await.map_err(to_mcp)?;
-    paged_result(params.page, params.limit, None, &orgs)
+pub async fn list_orgs(forge: &Forge, params: PageParams) -> Result<CallToolResult, McpError> {
+    // Returns a bare array (no count header), so `total` is unknown here.
+    let orgs = forge
+        .list_orgs(params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(params.page, params.limit, None, &into_items(orgs))
 }
 
 /// Parameters for the `list_notifications` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct ListNotificationsParams {
     /// Include read notifications too. Default: unread only.
     #[serde(default)]
@@ -274,10 +253,9 @@ pub struct ListNotificationsParams {
     pub limit: Option<u32>,
 }
 
-// A loose notification shape we deserialize into directly. `forgejo-api`'s strict
-// `NotificationThread` fails the whole page if any item has a value its enums don't model
-// (notably `StateType` has no `merged`, so a merged-PR notification breaks the list). We
-// capture only the fields we surface, with the volatile ones as plain strings, and ignore
+// A loose notification shape. Forgejo's strict `NotificationThread` enums don't model every
+// value the API emits (notably `StateType` has no `merged`, so a merged-PR notification would
+// break a strict parse), so we deserialize the volatile fields as plain strings and ignore
 // the rest (including the full embedded repository object).
 #[derive(Debug, serde::Deserialize)]
 struct LooseNotification {
@@ -299,22 +277,6 @@ struct LooseSubject {
     state: Option<String>,
     html_url: Option<String>,
     url: Option<String>,
-}
-// `forgejo_api::impl_from_response!` would do this, but it references the `soft_assert` crate
-// unqualified (a macro-hygiene gap), so it can't expand outside `forgejo-api`. Hand-roll it.
-impl forgejo_api::FromResponse for LooseNotification {
-    fn from_response(
-        response: forgejo_api::ApiResponse,
-        has_body: bool,
-    ) -> Result<Self, forgejo_api::StructureError> {
-        if !has_body {
-            return Err(forgejo_api::StructureError::EmptyResponse);
-        }
-        serde_json::from_slice(response.body()).map_err(|e| forgejo_api::StructureError::Serde {
-            e,
-            contents: response.body().clone(),
-        })
-    }
 }
 
 /// A slimmed notification thread (the raw form embeds a full repository object each).
@@ -349,27 +311,31 @@ fn summarize_notification(n: LooseNotification) -> NotificationSummary {
 
 /// Lists the user's notification threads (unread by default; `all` includes read ones).
 pub async fn list_notifications(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: ListNotificationsParams,
 ) -> Result<CallToolResult, McpError> {
-    let query = NotifyGetListQuery {
-        all: params.all,
-        ..NotifyGetListQuery::default()
-    };
-    // `response_type` swaps the strict `(headers, Vec<NotificationThread>)` for our loose
-    // `Vec<LooseNotification>` (so `total` is unavailable — hence `None` below).
-    let mut req = forgejo
-        .notify_get_list(query)
-        .response_type::<Vec<LooseNotification>>();
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    let threads = req.await.map_err(to_mcp)?;
+    // No count header on this endpoint, so `total` is `None`.
+    let raw = forge
+        .list_notifications(params.all, params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    let threads: Vec<LooseNotification> = decode(raw)?;
     let items: Vec<NotificationSummary> = threads.into_iter().map(summarize_notification).collect();
     paged_result(params.page, params.limit, None, &items)
+}
+
+// A loose comment shape, capturing only the fields we surface.
+#[derive(Debug, serde::Deserialize)]
+struct RawComment {
+    id: Option<i64>,
+    user: Option<RawUser>,
+    body: Option<String>,
+    created_at: Option<String>,
+    html_url: Option<String>,
+}
+#[derive(Debug, serde::Deserialize)]
+struct RawUser {
+    login: Option<String>,
 }
 
 /// A slimmed issue/PR comment (the raw form embeds a full user object each).
@@ -382,18 +348,18 @@ struct CommentSummary {
     url: Option<String>,
 }
 
-fn summarize_comment(c: Comment) -> CommentSummary {
+fn summarize_comment(c: RawComment) -> CommentSummary {
     CommentSummary {
         id: c.id,
         user: c.user.and_then(|u| u.login),
         body: c.body,
-        created_at: c.created_at.map(|d| d.to_string()),
-        url: c.html_url.map(|u| u.to_string()),
+        created_at: c.created_at,
+        url: c.html_url,
     }
 }
 
 /// Parameters for the `list_issue_comments` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct ListCommentsParams {
     /// Repository owner.
     pub owner: String,
@@ -411,30 +377,28 @@ pub struct ListCommentsParams {
 
 /// Lists the comments on an issue or pull request.
 pub async fn list_issue_comments(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: ListCommentsParams,
 ) -> Result<CallToolResult, McpError> {
-    let mut req = forgejo.issue_get_comments(
-        &params.owner,
-        &params.repo,
-        params.index,
-        IssueGetCommentsQuery::default(),
-    );
-    if let Some(page) = params.page {
-        req = req.page(page);
-    }
-    if let Some(limit) = params.limit {
-        req = req.page_size(limit);
-    }
-    let (headers, comments) = req.await.map_err(to_mcp)?;
+    let (raw, total) = forge
+        .list_issue_comments(
+            &params.owner,
+            &params.repo,
+            params.index,
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    let comments: Vec<RawComment> = decode(raw)?;
     let items: Vec<CommentSummary> = comments.into_iter().map(summarize_comment).collect();
-    paged_result(params.page, params.limit, headers.count(), &items)
+    paged_result(params.page, params.limit, total, &items)
 }
 
 // --- write tools (require write mode; see crate::server) ---
 
 /// Parameters for the `enable_write_mode` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct EnableWriteParams {
     /// How long write mode stays active, in minutes (default 10, hard-capped at 60). It
     /// also slides forward this far on each successful write, then auto-reverts.
@@ -443,7 +407,7 @@ pub struct EnableWriteParams {
 }
 
 /// Parameters for the `create_repo` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct CreateRepoParams {
     /// Name of the repository to create (under the authenticated user).
     pub name: String,
@@ -456,7 +420,7 @@ pub struct CreateRepoParams {
 }
 
 /// Parameters for the `delete_repo` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct DeleteRepoParams {
     /// Repository owner.
     pub owner: String,
@@ -468,26 +432,20 @@ pub struct DeleteRepoParams {
 
 /// Creates a repository for the authenticated user (defaults to private).
 pub async fn create_repo(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: CreateRepoParams,
 ) -> Result<CallToolResult, McpError> {
-    // CreateRepoOption has no Default, so every field is set explicitly.
-    let option = CreateRepoOption {
-        name: params.name,
-        private: params.private.or(Some(true)),
-        description: params.description,
-        auto_init: None,
-        default_branch: None,
-        gitignores: None,
-        issue_labels: None,
-        license: None,
-        object_format_name: None,
-        readme: None,
-        template: None,
-        trust_model: None,
-    };
-    let repo = forgejo
-        .create_current_user_repo(option)
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_owned(), Value::String(params.name));
+    body.insert(
+        "private".to_owned(),
+        Value::Bool(params.private.unwrap_or(true)),
+    );
+    if let Some(description) = params.description {
+        body.insert("description".to_owned(), Value::String(description));
+    }
+    let repo = forge
+        .create_repo(&Value::Object(body))
         .await
         .map_err(to_mcp)?;
     json_result(&repo)
@@ -495,7 +453,7 @@ pub async fn create_repo(
 
 /// Deletes a repository — guarded by an exact `owner/repo` confirmation.
 pub async fn delete_repo(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: DeleteRepoParams,
 ) -> Result<CallToolResult, McpError> {
     let expected = format!("{}/{}", params.owner, params.repo);
@@ -505,15 +463,15 @@ pub async fn delete_repo(
             None,
         ));
     }
-    forgejo
-        .repo_delete(&params.owner, &params.repo)
+    forge
+        .delete_repo(&params.owner, &params.repo)
         .await
         .map_err(to_mcp)?;
     json_result(&serde_json::json!({ "deleted": expected }))
 }
 
 /// Parameters for the `create_issue` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct CreateIssueParams {
     /// Repository owner.
     pub owner: String,
@@ -528,30 +486,23 @@ pub struct CreateIssueParams {
 
 /// Creates an issue in `owner/repo`.
 pub async fn create_issue(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: CreateIssueParams,
 ) -> Result<CallToolResult, McpError> {
-    // CreateIssueOption has no Default, so every field is set explicitly.
-    let option = CreateIssueOption {
-        title: params.title,
-        body: params.body,
-        assignee: None,
-        assignees: None,
-        closed: None,
-        due_date: None,
-        labels: None,
-        milestone: None,
-        r#ref: None,
-    };
-    let issue = forgejo
-        .issue_create_issue(&params.owner, &params.repo, option)
+    let mut body = serde_json::Map::new();
+    body.insert("title".to_owned(), Value::String(params.title));
+    if let Some(text) = params.body {
+        body.insert("body".to_owned(), Value::String(text));
+    }
+    let issue = forge
+        .create_issue(&params.owner, &params.repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
     json_result(&issue)
 }
 
 /// Parameters for the `comment_on_issue` tool.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct CommentOnIssueParams {
     /// Repository owner.
     pub owner: String,
@@ -565,16 +516,14 @@ pub struct CommentOnIssueParams {
 
 /// Adds a comment to an issue or pull request.
 pub async fn comment_on_issue(
-    forgejo: &Forgejo,
+    forge: &Forge,
     params: CommentOnIssueParams,
 ) -> Result<CallToolResult, McpError> {
-    let option = CreateIssueCommentOption {
-        body: params.body,
-        updated_at: None,
-    };
-    let comment = forgejo
-        .issue_create_comment(&params.owner, &params.repo, params.index, option)
+    let body = serde_json::json!({ "body": params.body });
+    let raw = forge
+        .comment_on_issue(&params.owner, &params.repo, params.index, &body)
         .await
         .map_err(to_mcp)?;
+    let comment: RawComment = decode(raw)?;
     json_result(&summarize_comment(comment))
 }

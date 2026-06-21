@@ -4,6 +4,7 @@
 //! transport), builds the server from the environment, and serves until the client
 //! disconnects.
 
+mod forge;
 mod server;
 mod tools;
 

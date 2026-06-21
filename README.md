@@ -12,10 +12,10 @@ repositories, issues, and pull requests — over the Forgejo REST API.
 > `delete_repo`) gated behind a separate write token and a deliberate, time-boxed **write
 > mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
-It's a thin tool layer over the [`forgejo-api`](https://crates.io/crates/forgejo-api) crate
-(a maintained, typed Forgejo client) — an **independent implementation over the documented
-API**, not a port of any other server. Building our own means the tool surface holding your
-token is code you can read and audit.
+It speaks the Forgejo REST API directly through a small, in-house client (`src/forge/`) — an
+**independent implementation over the documented API**, not a port of any other server. There
+is no third-party forge SDK in the trust path, so the tool surface holding your token is code
+you can read and audit end to end.
 
 ## Build
 
@@ -104,8 +104,9 @@ see the [specification](SPECIFICATION.md).
 
 ## Security
 
-The token is read from the environment only — never logged, never written to disk
-(`forgejo-api` zeroizes it). v0.1 is read-only, so the server cannot modify your account.
+The token is read from the environment only — never logged, never written to disk (the client
+holds it in a zeroized buffer and marks the `Authorization` header sensitive). Read-only by
+default, so the server cannot modify your account without a separate write token and write mode.
 Tool output is untrusted, repo-derived text — the server flags it as data, not instructions.
 See [`SPECIFICATION.md`](SPECIFICATION.md#security-model).
 
@@ -122,13 +123,11 @@ CI runs the same on [Codeberg Forgejo Actions](.forgejo/workflows/ci.yml); a tra
 [`.githooks/pre-push`](.githooks/pre-push) hook mirrors it locally
 (`git config core.hooksPath .githooks`).
 
-## Credits
+## History
 
-This server stands almost entirely on [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api)
-by **Cyborus** — the typed, maintained Forgejo client that does the real work. The hard part,
-modelling Forgejo's REST surface and tracking its swagger, lives in that crate;
-`forgejo-mcp-rs` is just a thin MCP adaptor over it. Sincere thanks to Cyborus and the
-`forgejo-api` contributors. (`forgejo-api` is licensed Apache-2.0 OR MIT.)
+Releases through v0.5 were built on the [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api)
+crate by Cyborus. `forgejo-mcp-rs` now talks to the Forgejo REST API through its own small
+client and carries no third-party forge SDK.
 
 ## License
 
