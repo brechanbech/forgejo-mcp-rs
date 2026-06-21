@@ -7,10 +7,10 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for
 an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
 repositories, issues, and pull requests — over the Forgejo REST API.
 
-> Status: **v0.1.0, read-only.** Seven read tools — the authenticated user, repositories,
-> issues, pull requests, and repository search (with `state`/pagination filters) — over the
-> Forgejo REST API. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full plan; writes
-> land in v0.2.
+> Status: **read-only by default, with opt-in guarded writes (v0.2).** Seven read tools
+> (user, repos, issues, pull requests, search) plus repository management (`create_repo` /
+> `delete_repo`) gated behind a separate write token and a deliberate, time-boxed **write
+> mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
 It's a thin tool layer over the [`forgejo-api`](https://crates.io/crates/forgejo-api) crate
 (a maintained, typed Forgejo client) — an **independent implementation over the documented
@@ -29,12 +29,23 @@ The server is configured by environment variables:
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `FORGEJO_TOKEN` | **yes** | — | Forgejo/Codeberg access token. **Read-only scopes are enough.** |
+| `FORGEJO_TOKEN` | **yes** | — | Read token. **Read-only scopes are enough** for the read tools. |
+| `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Providing it enables the write tools**; omit it for a pure read-only server. |
+| `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 
 Mint a token at **Codeberg → Settings → Applications** (or your instance's equivalent). For
-the current read-only tools, read scopes such as `read:repository`, `read:issue`, and
-`read:user` suffice.
+the read tools, read scopes (`read:repository`, `read:issue`, `read:user`) suffice. The write
+token needs `write:repository` (including delete).
+
+### Write mode
+
+The server is **read-only by default.** `create_repo` / `delete_repo` work only when (a)
+`FORGEJO_TOKEN_WRITE` is configured **and** (b) you've deliberately entered **write mode** via
+`enable_write_mode` — a time-boxed elevation (default 10 min, max 60) that slides forward on
+each write and auto-reverts. `write_status` reports the state; `delete_repo` also requires a
+`confirm` argument equal to `"owner/repo"`. See [`SPECIFICATION.md`](SPECIFICATION.md#write-mode-deliberate-time-boxed-elevation)
+for the full design (and the honest "guardrail, not sandbox" caveat).
 
 ### Wire it into Claude Code
 
@@ -64,15 +75,19 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 
 | Tool | Status | Notes |
 |---|---|---|
-| `whoami` | ✅ | The authenticated user (verifies the token) |
-| `list_my_repos` | ✅ | Your repositories (first page) |
-| `list_issues` / `get_issue` | ✅ | Issues in `owner/repo` (open by default) |
-| `list_pull_requests` / `get_pull_request` | ✅ | Pull requests in `owner/repo` (open by default) |
-| `search_repos` | ✅ | Repository search by keyword |
+| `whoami` | ✅ read | The authenticated user (verifies the token) |
+| `list_my_repos` | ✅ read | Your repositories (first page) |
+| `list_issues` / `get_issue` | ✅ read | Issues in `owner/repo` (open by default) |
+| `list_pull_requests` / `get_pull_request` | ✅ read | Pull requests in `owner/repo` (open by default) |
+| `search_repos` | ✅ read | Repository search by keyword |
+| `write_status` | ✅ read | Report write-mode state (token configured? active? minutes left?) |
+| `enable_write_mode` / `disable_write_mode` | ✅ | Enter/leave the time-boxed write mode |
+| `create_repo` | ✅ **write** | Create a repo (defaults to private) |
+| `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 
-The list tools accept optional `state` (`open`/`closed`/`all`, on issues/PRs) and
-`page`/`limit` pagination; sort order and other upstream filters aren't exposed yet. Write
-tools (create issue / comment) are deferred to v0.2 — see the
+Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`
+pagination; sort/other filters and slimmed output aren't exposed yet. The **write** tools
+require write mode (above). `edit_repo` and issue/PR writes are future work — see the
 [specification](SPECIFICATION.md).
 
 ## Security

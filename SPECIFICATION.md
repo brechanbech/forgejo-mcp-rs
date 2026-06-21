@@ -8,7 +8,9 @@ exposes. Code and README track this document.
 A [Model Context Protocol](https://modelcontextprotocol.io/) server, in Rust, that lets an
 MCP client (Claude Code, Claude Desktop, …) inspect a [Forgejo](https://forgejo.org/)
 instance — primarily [Codeberg](https://codeberg.org) — over its REST API: the authenticated
-user, repositories, issues, and pull requests. **v0.1 is read-only.**
+user, repositories, issues, and pull requests. **Read-only by default**; repository writes
+(create/delete) are available only via a separate write token and a deliberate, time-boxed
+write mode (v0.2).
 
 It exists so the assistant can read repo/issue/PR context directly while you work, without
 shell-scripting `curl` against the API or trusting a pre-built third-party server with your
@@ -40,7 +42,9 @@ sibling `kicad-mcp-rs` project.
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `FORGEJO_TOKEN` | **yes** | — | Forgejo/Codeberg access token (read-only scopes suffice). |
+| `FORGEJO_TOKEN` | **yes** | — | Read access token (read-only scopes suffice for the read tools). |
+| `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Its presence enables the write tools**; absent ⇒ the server is read-only. |
+| `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window, clamped to `1..=60`. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 | `RUST_LOG` | no | `forgejo_mcp_rs=info` | Tracing filter (logs go to stderr). |
 
@@ -48,15 +52,36 @@ The server refuses to start without `FORGEJO_TOKEN`, with a clear message.
 
 ## Security model
 
-- The token is read **from the environment only** — never a CLI argument, never written to
-  a file, never logged. `forgejo-api` zeroizes it after building request headers.
-- **Read-only first.** v0.1 exposes no write tools, so a leaked or over-shared client cannot
-  modify your account. Mint a **read-scoped** token.
+- Tokens are read **from the environment only** — never a CLI argument, never written to a
+  file, never logged. `forgejo-api` zeroizes them after building request headers.
+- **Read-only by default.** Reads use `FORGEJO_TOKEN`. Writes use a *separate*
+  `FORGEJO_TOKEN_WRITE`; if it isn't configured, the write tools refuse permanently — so
+  *providing the second token is the opt-in* to any destructive capability.
 - **Untrusted output.** Tool results are repository-derived text (issue/PR titles and bodies,
   repo names, user content). The `ServerHandler` instructions flag this: the client/model
   must treat it as data, never as instructions (indirect prompt-injection defense is the
   client's responsibility; the server simply does not amplify it).
 - `unsafe` code is forbidden crate-wide.
+
+### Write mode (deliberate, time-boxed elevation)
+
+Even with a write token present, the server **starts read-only** and writes are refused until
+the model deliberately elevates — "sudo with a timeout":
+
+- `enable_write_mode(minutes?)` activates write mode for `minutes` (default `FORGEJO_WRITE_MINUTES`,
+  **hard-capped at 60** — there is deliberately no permanent mode). `disable_write_mode` ends it.
+- The window **slides**: each successful write extends it by the same length; otherwise it
+  **auto-reverts** to read-only. Expiry is checked lazily on each call (no background timer).
+- Write tools (`create_repo`, `delete_repo`) refuse with `invalid_params` if the write token
+  is absent or write mode is inactive. `delete_repo` additionally requires a `confirm` argument
+  exactly equal to `"owner/repo"`.
+- It is **loud**: `write_status` reports the state anytime, every write result notes the
+  remaining window, and the instructions tell the model to announce elevation and actions.
+
+**Honest scope:** both tokens live in the process's memory throughout, so this is a
+*deliberate-action guardrail* (like a `sudo` timestamp), **not a sandbox** — a fully
+compromised process would still hold both tokens. A true boundary would need a separate
+token-broker process, which is out of scope.
 
 ## Tool surface
 
@@ -82,10 +107,21 @@ invalid `state` is rejected with `invalid_params` before any request is made.
 (labels, milestones, author, …) aren't exposed yet, and output is the full upstream
 struct(s), not slimmed summaries.
 
-### v0.2 — writes (not yet built)
+### v0.2 — write mode & repo management
 
-`create_issue`, `comment_on_issue`, and similar. These require write-scoped tokens and are
-deliberately deferred until the read surface is validated.
+Require `FORGEJO_TOKEN_WRITE` + active write mode (see the security model).
+
+| Tool | Status | Purpose |
+|---|---|---|
+| `write_status` | **done** | Report mode state (read tool; always available). |
+| `enable_write_mode` | **done** | Elevate to write mode for a sliding, capped window. |
+| `disable_write_mode` | **done** | Return to read-only immediately. |
+| `create_repo` | **done** | Create a repo for the authenticated user (defaults to private). |
+| `delete_repo` | **done** | Delete a repo (guarded by an exact `owner/repo` `confirm`). |
+
+**Deferred:** `edit_repo` (rename/visibility/archive) — `EditRepoOption` has 20+ no-`Default`
+fields and Codeberg renames are unreliable; not yet needed. Issue/PR writes (`create_issue`,
+`comment_on_issue`) are also future work.
 
 ## Error handling
 
@@ -116,5 +152,7 @@ a real client) so slow responses can return.
 
 ## Milestones
 
-1. **v0.1.0** — read-only surface (the table above), validated against live Codeberg, tagged.
-2. **v0.2.0** — selected write tools behind explicit write-scoped tokens.
+1. **v0.1.0** — read-only surface, validated against live Codeberg, tagged. *(done)*
+2. **v0.2.0** — write mode + repo management (`create_repo` / `delete_repo`) behind a separate
+   write token and deliberate, time-boxed elevation.
+3. Later — `edit_repo`, issue/PR writes, slimmed output, sort filters.

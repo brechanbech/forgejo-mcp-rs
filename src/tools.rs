@@ -5,7 +5,7 @@
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
 
 use forgejo_api::structs::{
-    IssueListIssuesQuery, IssueListIssuesQueryState, RepoListPullRequestsQuery,
+    CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState, RepoListPullRequestsQuery,
     RepoListPullRequestsQueryState, RepoSearchQuery, UserCurrentListReposQuery,
 };
 use forgejo_api::{ApiErrorKind, Forgejo, ForgejoError};
@@ -36,7 +36,7 @@ fn to_mcp(err: ForgejoError) -> McpError {
 }
 
 /// Serializes a value as pretty JSON in a successful tool result.
-fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+pub(crate) fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -223,4 +223,85 @@ pub async fn search_repos(
     }
     let results = req.await.map_err(to_mcp)?;
     json_result(&results)
+}
+
+// --- write tools (require write mode; see crate::server) ---
+
+/// Parameters for the `enable_write_mode` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EnableWriteParams {
+    /// How long write mode stays active, in minutes (default 10, hard-capped at 60). It
+    /// also slides forward this far on each successful write, then auto-reverts.
+    #[serde(default)]
+    pub minutes: Option<u32>,
+}
+
+/// Parameters for the `create_repo` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateRepoParams {
+    /// Name of the repository to create (under the authenticated user).
+    pub name: String,
+    /// Whether the repository is private. Defaults to private when omitted.
+    #[serde(default)]
+    pub private: Option<bool>,
+    /// Optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Parameters for the `delete_repo` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteRepoParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Safety guard: must be exactly `"owner/repo"`, or the delete is refused.
+    pub confirm: String,
+}
+
+/// Creates a repository for the authenticated user (defaults to private).
+pub async fn create_repo(
+    forgejo: &Forgejo,
+    params: CreateRepoParams,
+) -> Result<CallToolResult, McpError> {
+    // CreateRepoOption has no Default, so every field is set explicitly.
+    let option = CreateRepoOption {
+        name: params.name,
+        private: params.private.or(Some(true)),
+        description: params.description,
+        auto_init: None,
+        default_branch: None,
+        gitignores: None,
+        issue_labels: None,
+        license: None,
+        object_format_name: None,
+        readme: None,
+        template: None,
+        trust_model: None,
+    };
+    let repo = forgejo
+        .create_current_user_repo(option)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&repo)
+}
+
+/// Deletes a repository — guarded by an exact `owner/repo` confirmation.
+pub async fn delete_repo(
+    forgejo: &Forgejo,
+    params: DeleteRepoParams,
+) -> Result<CallToolResult, McpError> {
+    let expected = format!("{}/{}", params.owner, params.repo);
+    if params.confirm != expected {
+        return Err(McpError::invalid_params(
+            format!("delete refused: `confirm` must be exactly \"{expected}\""),
+            None,
+        ));
+    }
+    forgejo
+        .repo_delete(&params.owner, &params.repo)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&serde_json::json!({ "deleted": expected }))
 }
