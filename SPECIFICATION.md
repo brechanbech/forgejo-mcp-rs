@@ -48,8 +48,12 @@ sibling `kicad-mcp-rs` project.
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 | `RUST_LOG` | no | `forgejo_mcp_rs=info` | Tracing filter (logs go to stderr). |
 
-\* A read token is required (under either name); the server refuses to start without one,
-with a clear message.
+\* A read token is required (under either name); the server refuses to start without one. A
+**write token alone is refused** — reads must use a dedicated read-only token, even though a
+write token could technically read — and the read token **must differ** from
+`FORGEJO_TOKEN_WRITE` (no reusing the write token in the read slot). The server can't verify a
+token's *scope* without probing, so this is a structural guard (presence + distinctness), not
+a scope check.
 
 ## Security model
 

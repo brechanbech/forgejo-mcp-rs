@@ -60,22 +60,21 @@ impl ForgejoMcp {
         let url_raw = std::env::var("FORGEJO_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
         let url = Url::parse(&url_raw)
             .with_context(|| format!("FORGEJO_URL is not a valid URL: {url_raw}"))?;
-        // Prefer the explicit read-only name; accept FORGEJO_TOKEN too (convention).
-        let token = std::env::var("FORGEJO_TOKEN_READ_ONLY")
-            .or_else(|_| std::env::var("FORGEJO_TOKEN"))
-            .context(
-                "a read token is required — set FORGEJO_TOKEN_READ_ONLY (or FORGEJO_TOKEN) to \
-                 a Forgejo/Codeberg access token (read-only scopes are enough)",
-            )?;
-        let forgejo = Forgejo::new(Auth::Token(&token), url.clone())
-            .map_err(|e| anyhow::anyhow!("building the Forgejo client: {e}"))?;
-
-        let write = match std::env::var("FORGEJO_TOKEN_WRITE") {
-            Ok(wt) if !wt.is_empty() => Some(Arc::new(
+        // A dedicated read-only token is mandatory; a write token alone is refused, and the
+        // read token may not be a copy of the write token. (Resolved + checked separately.)
+        let (read_token, write_token) = resolve_tokens(
+            std::env::var("FORGEJO_TOKEN_READ_ONLY").ok(),
+            std::env::var("FORGEJO_TOKEN").ok(),
+            std::env::var("FORGEJO_TOKEN_WRITE").ok(),
+        )?;
+        let forgejo = Forgejo::new(Auth::Token(&read_token), url.clone())
+            .map_err(|e| anyhow::anyhow!("building the read client: {e}"))?;
+        let write = match write_token {
+            Some(wt) => Some(Arc::new(
                 Forgejo::new(Auth::Token(&wt), url)
                     .map_err(|e| anyhow::anyhow!("building the write client: {e}"))?,
             )),
-            _ => None,
+            None => None,
         };
 
         let minutes = std::env::var("FORGEJO_WRITE_MINUTES")
@@ -145,6 +144,31 @@ impl ForgejoMcp {
             format!("write mode active — about {left} min remaining (auto-reverts)")
         }
     }
+}
+
+/// Resolves the read token (required) and optional write token from their env values, while
+/// enforcing two rules: a dedicated read token must exist (a write token alone is refused —
+/// even though it could read), and the read token must differ from the write token (no
+/// reusing the write token in the read slot). Empty strings count as unset.
+fn resolve_tokens(
+    read_only: Option<String>,
+    legacy: Option<String>,
+    write: Option<String>,
+) -> anyhow::Result<(String, Option<String>)> {
+    let nonempty = |value: Option<String>| value.filter(|s| !s.is_empty());
+    let read = nonempty(read_only).or_else(|| nonempty(legacy)).context(
+        "a read-only token is required: set FORGEJO_TOKEN_READ_ONLY (or FORGEJO_TOKEN) to a \
+         read-scoped token. A write token alone is refused — reads must use a dedicated \
+         read-only token, even though a write token could technically read.",
+    )?;
+    let write = nonempty(write);
+    if write.as_deref() == Some(read.as_str()) {
+        anyhow::bail!(
+            "the read token and FORGEJO_TOKEN_WRITE must be different tokens — put a separate \
+             read-only token in the read slot, not a copy of the write token."
+        );
+    }
+    Ok((read, write))
 }
 
 /// Read-only Forgejo tools.
@@ -328,8 +352,43 @@ impl ServerHandler for ForgejoMcp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Auth, Duration, ForgejoMcp, Instant, Mutex, Url};
+    use super::{Arc, Auth, Duration, ForgejoMcp, Instant, Mutex, Url, resolve_tokens};
     use forgejo_api::Forgejo;
+
+    #[test]
+    fn read_token_is_required() {
+        assert!(
+            resolve_tokens(None, None, None).is_err(),
+            "nothing -> refused"
+        );
+        // The "clever" case: a write token alone is refused.
+        assert!(
+            resolve_tokens(None, None, Some("w".into())).is_err(),
+            "write token only -> refused"
+        );
+        // Empty strings count as unset.
+        assert!(resolve_tokens(Some(String::new()), None, Some("w".into())).is_err());
+    }
+
+    #[test]
+    fn read_and_write_must_differ() {
+        assert!(
+            resolve_tokens(Some("same".into()), None, Some("same".into())).is_err(),
+            "read == write -> refused"
+        );
+        let (r, w) = resolve_tokens(Some("r".into()), None, Some("w".into())).unwrap();
+        assert_eq!((r.as_str(), w.as_deref()), ("r", Some("w")));
+    }
+
+    #[test]
+    fn read_token_resolves_with_fallback_and_no_write() {
+        // FORGEJO_TOKEN fallback works; no write token -> read-only.
+        let (r, w) = resolve_tokens(None, Some("legacy".into()), None).unwrap();
+        assert_eq!((r.as_str(), w), ("legacy", None));
+        // An empty write token is treated as unset (not equal-to-read failure).
+        let (r, w) = resolve_tokens(Some("r".into()), None, Some(String::new())).unwrap();
+        assert_eq!((r.as_str(), w), ("r", None));
+    }
 
     /// A server with dummy clients (no network is touched by the gating logic under test).
     fn server(with_write: bool) -> ForgejoMcp {

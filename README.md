@@ -38,6 +38,10 @@ Mint a token at **Codeberg → Settings → Applications** (or your instance's e
 the read tools, read scopes (`read:repository`, `read:issue`, `read:user`) suffice. The write
 token needs `write:repository` (including delete).
 
+A **read token is mandatory**: the server refuses to start on a write token alone, and the
+read token must be a *different* token from `FORGEJO_TOKEN_WRITE` — you can't shortcut by
+reusing the write token for reads.
+
 ### Write mode
 
 The server is **read-only by default.** `create_repo` / `delete_repo` work only when (a)
