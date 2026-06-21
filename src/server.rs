@@ -329,6 +329,21 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    /// Creates an issue in a repository.
+    #[tool(
+        description = "Create an issue in a repository (owner/repo/title, optional body; requires write mode)"
+    )]
+    async fn create_issue(
+        &self,
+        Parameters(params): Parameters<tools::CreateIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::create_issue(client, params).await?;
+        self.extend_window();
+        result.content.push(Content::text(self.window_note()));
+        Ok(result)
+    }
+
     /// Deletes a repository (guarded by an exact `owner/repo` confirmation).
     #[tool(
         description = "Delete a repository (requires write mode; `confirm` must be exactly \"owner/repo\")"

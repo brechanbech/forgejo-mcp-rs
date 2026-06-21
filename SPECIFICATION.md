@@ -134,11 +134,12 @@ Require `FORGEJO_TOKEN_WRITE` + active write mode (see the security model).
 | `enable_write_mode` | **done** | Elevate to write mode for a sliding, capped window. |
 | `disable_write_mode` | **done** | Return to read-only immediately. |
 | `create_repo` | **done** | Create a repo for the authenticated user (defaults to private). |
+| `create_issue` | **done** | Create an issue in `owner/repo` (title required, optional body). |
 | `delete_repo` | **done** | Delete a repo (guarded by an exact `owner/repo` `confirm`). |
 
 **Deferred:** `edit_repo` (rename/visibility/archive) — `EditRepoOption` has 20+ no-`Default`
-fields and Codeberg renames are unreliable; not yet needed. Issue/PR writes (`create_issue`,
-`comment_on_issue`) are also future work.
+fields and Codeberg renames are unreliable; not yet needed. `comment_on_issue` and other
+issue/PR writes are also future work.
 
 ## Error handling
 

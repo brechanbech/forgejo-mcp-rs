@@ -90,6 +90,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `write_status` | ✅ read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` | ✅ | Enter/leave the time-boxed write mode |
 | `create_repo` | ✅ **write** | Create a repo (defaults to private) |
+| `create_issue` | ✅ **write** | Create an issue (owner/repo/title, optional body) |
 | `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`, and

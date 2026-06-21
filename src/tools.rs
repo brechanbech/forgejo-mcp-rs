@@ -5,8 +5,8 @@
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
 
 use forgejo_api::structs::{
-    CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState, NotifyGetListQuery,
-    RepoListPullRequestsQuery, RepoListPullRequestsQueryState, RepoSearchQuery,
+    CreateIssueOption, CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState,
+    NotifyGetListQuery, RepoListPullRequestsQuery, RepoListPullRequestsQueryState, RepoSearchQuery,
     UserCurrentListReposQuery,
 };
 use forgejo_api::{ApiErrorKind, CountHeader, Forgejo, ForgejoError};
@@ -451,4 +451,42 @@ pub async fn delete_repo(
         .await
         .map_err(to_mcp)?;
     json_result(&serde_json::json!({ "deleted": expected }))
+}
+
+/// Parameters for the `create_issue` tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateIssueParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue title.
+    pub title: String,
+    /// Issue body (Markdown). Optional.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// Creates an issue in `owner/repo`.
+pub async fn create_issue(
+    forgejo: &Forgejo,
+    params: CreateIssueParams,
+) -> Result<CallToolResult, McpError> {
+    // CreateIssueOption has no Default, so every field is set explicitly.
+    let option = CreateIssueOption {
+        title: params.title,
+        body: params.body,
+        assignee: None,
+        assignees: None,
+        closed: None,
+        due_date: None,
+        labels: None,
+        milestone: None,
+        r#ref: None,
+    };
+    let issue = forgejo
+        .issue_create_issue(&params.owner, &params.repo, option)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&issue)
 }
