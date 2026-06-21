@@ -90,10 +90,12 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `create_repo` | ✅ **write** | Create a repo (defaults to private) |
 | `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 
-Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`
-pagination; sort/other filters and slimmed output aren't exposed yet. The **write** tools
-require write mode (above). `edit_repo` and issue/PR writes are future work — see the
-[specification](SPECIFICATION.md).
+Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`, and
+return a `{ page, limit, returned, total, items }` envelope so paging is self-describing —
+`total` lets the caller tell whether more pages remain (it's `null` for `search_repos`,
+which doesn't report a count). Sort/other filters and slimmed output aren't exposed yet. The
+**write** tools require write mode (above). `edit_repo` and issue/PR writes are future work —
+see the [specification](SPECIFICATION.md).
 
 ## Security
 

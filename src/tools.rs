@@ -8,7 +8,7 @@ use forgejo_api::structs::{
     CreateRepoOption, IssueListIssuesQuery, IssueListIssuesQueryState, RepoListPullRequestsQuery,
     RepoListPullRequestsQueryState, RepoSearchQuery, UserCurrentListReposQuery,
 };
-use forgejo_api::{ApiErrorKind, Forgejo, ForgejoError};
+use forgejo_api::{ApiErrorKind, CountHeader, Forgejo, ForgejoError};
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
@@ -40,6 +40,23 @@ pub(crate) fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, Mcp
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
+}
+
+/// Wraps a page of list results with pagination metadata, so the caller can tell where it
+/// is and whether more remain. `total` is the full count when the endpoint reports it.
+fn paged_result<T: Serialize>(
+    page: Option<u32>,
+    limit: Option<u32>,
+    total: Option<usize>,
+    items: &[T],
+) -> Result<CallToolResult, McpError> {
+    json_result(&serde_json::json!({
+        "page": page.unwrap_or(1),
+        "limit": limit,
+        "returned": items.len(),
+        "total": total,
+        "items": items,
+    }))
 }
 
 /// Returns the authenticated user — proof the token works.
@@ -132,7 +149,7 @@ pub async fn list_my_repos(
     forgejo: &Forgejo,
     params: PageParams,
 ) -> Result<CallToolResult, McpError> {
-    // The list endpoints return `(pagination headers, items)`; we surface just the items.
+    // The list endpoints return `(pagination headers, items)`; the headers carry the total.
     let mut req = forgejo.user_current_list_repos(UserCurrentListReposQuery::default());
     if let Some(page) = params.page {
         req = req.page(page);
@@ -140,8 +157,8 @@ pub async fn list_my_repos(
     if let Some(limit) = params.limit {
         req = req.page_size(limit);
     }
-    let (_, repos) = req.await.map_err(to_mcp)?;
-    json_result(&repos)
+    let (headers, repos) = req.await.map_err(to_mcp)?;
+    paged_result(params.page, params.limit, headers.count(), &repos)
 }
 
 /// Lists issues in `owner/repo` (open issues by default).
@@ -160,8 +177,8 @@ pub async fn list_issues(
     if let Some(limit) = params.limit {
         req = req.page_size(limit);
     }
-    let (_, issues) = req.await.map_err(to_mcp)?;
-    json_result(&issues)
+    let (headers, issues) = req.await.map_err(to_mcp)?;
+    paged_result(params.page, params.limit, headers.count(), &issues)
 }
 
 /// Gets one issue by index.
@@ -189,8 +206,8 @@ pub async fn list_pull_requests(
     if let Some(limit) = params.limit {
         req = req.page_size(limit);
     }
-    let (_, prs) = req.await.map_err(to_mcp)?;
-    json_result(&prs)
+    let (headers, prs) = req.await.map_err(to_mcp)?;
+    paged_result(params.page, params.limit, headers.count(), &prs)
 }
 
 /// Gets one pull request by index.
@@ -221,8 +238,11 @@ pub async fn search_repos(
     if let Some(limit) = params.limit {
         req = req.page_size(limit);
     }
+    // `repo_search` returns `SearchResults { data, ok }` (no count header), so `total` is
+    // unknown here — surface the items in the same envelope for consistency.
     let results = req.await.map_err(to_mcp)?;
-    json_result(&results)
+    let items = results.data.unwrap_or_default();
+    paged_result(params.page, params.limit, None, &items)
 }
 
 // --- write tools (require write mode; see crate::server) ---

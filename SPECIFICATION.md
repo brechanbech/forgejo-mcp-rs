@@ -106,11 +106,14 @@ Each tool returns the relevant `forgejo-api` struct(s) serialized as pretty JSON
 
 The list tools accept optional `state` (`open`/`closed`/`all`, on issues and pull requests)
 and `page` / `limit` pagination (via `forgejo-api`'s `Request::page` / `page_size`). An
-invalid `state` is rejected with `invalid_params` before any request is made.
+invalid `state` is rejected with `invalid_params` before any request is made. Each list tool
+returns a `{ page, limit, returned, total, items }` envelope (the `total` comes from the
+endpoint's count header — `CountHeader`), so the caller can tell whether more pages remain.
+`search_repos` reports `total: null` (its `SearchResults` carries no count).
 
-**v0.1 limitations (planned refinements):** sort order and the other upstream query filters
-(labels, milestones, author, …) aren't exposed yet, and output is the full upstream
-struct(s), not slimmed summaries.
+**Limitations (planned refinements):** sort order and the other upstream query filters
+(labels, milestones, author, …) aren't exposed yet, and the per-item output is the full
+upstream struct, not a slimmed summary.
 
 ### v0.2 — write mode & repo management
 
