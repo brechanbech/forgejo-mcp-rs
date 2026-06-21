@@ -181,6 +181,29 @@ no API that reports a Forgejo-Actions run's pass/fail. Revisit if/when Codeberg 
 Actions-runs API. (Aside: the empty `state: ""` also can't deserialize into `forgejo-api`'s
 `CommitStatusState` — a third strict-enum gap, alongside the `merged`-state one in #159.)
 
+### Upstream (`forgejo-api`) relationship
+
+We hit three real, AI-independent gaps in `forgejo-api`: `StateType` has no `merged`,
+`CommitStatusState` rejects the empty `state: ""`, and `impl_from_response!` references the
+`soft_assert` crate unqualified (a macro-hygiene gap that blocks expansion outside the crate).
+The upstream issue reporting these was **closed (won't-fix)** — the maintainer doesn't accept
+AI-tooling-related contributions. That's their call on their repo, and we leave it there.
+
+All three gaps are already worked around **in-tree**, from outside the crate: loose
+deserialize via `Request::response_type` plus a hand-rolled `FromResponse` (see
+`tools::LooseNotification`). So nothing forces a fork today.
+
+The plan, in order:
+
+1. **Now** — keep the in-tree workarounds; depend on `forgejo-api` from the registry.
+2. **If blocked** — only if we hit something that *can't* be worked around externally (a
+   private field, or an endpoint with no `response_type` escape hatch), fork `forgejo-api`
+   (Apache-2.0 OR MIT — clean), carry the *minimal* patch, and point Cargo at it via
+   `[patch.crates-io]`. Drop the patch the day upstream or a community fork fixes it.
+
+A full hard fork (owning the whole client + tracking upstream forever) is deliberately *not*
+the plan — too much surface for a thin MCP adaptor to carry over a few small patches.
+
 ## Milestones
 
 1. **v0.1.0** — read-only surface, validated against live Codeberg, tagged. *(done)*
