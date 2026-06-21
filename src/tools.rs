@@ -395,6 +395,94 @@ pub async fn list_issue_comments(
     paged_result(params.page, params.limit, total, &items)
 }
 
+// A loose review shape; `state` stays a string so unfamiliar values don't break parsing.
+#[derive(Debug, serde::Deserialize)]
+struct RawReview {
+    id: Option<i64>,
+    user: Option<RawUser>,
+    body: Option<String>,
+    /// e.g. `APPROVED`, `REQUEST_CHANGES`, `COMMENT`, `PENDING`.
+    state: Option<String>,
+    /// Whether the review counts toward the branch's review requirements.
+    official: Option<bool>,
+    /// Whether the review was dismissed.
+    dismissed: Option<bool>,
+    /// Whether the review is stale (made against an older commit).
+    stale: Option<bool>,
+    /// Count of inline (line-anchored) comments attached to this review.
+    comments_count: Option<i64>,
+    submitted_at: Option<String>,
+    html_url: Option<String>,
+}
+
+/// A slimmed pull-request review (the raw form embeds a full user object each).
+#[derive(Debug, Serialize)]
+struct ReviewSummary {
+    id: Option<i64>,
+    user: Option<String>,
+    body: Option<String>,
+    state: Option<String>,
+    official: Option<bool>,
+    dismissed: Option<bool>,
+    stale: Option<bool>,
+    comments_count: Option<i64>,
+    submitted_at: Option<String>,
+    url: Option<String>,
+}
+
+fn summarize_review(r: RawReview) -> ReviewSummary {
+    ReviewSummary {
+        id: r.id,
+        user: r.user.and_then(|u| u.login),
+        body: r.body,
+        state: r.state,
+        official: r.official,
+        dismissed: r.dismissed,
+        stale: r.stale,
+        comments_count: r.comments_count,
+        submitted_at: r.submitted_at,
+        url: r.html_url,
+    }
+}
+
+/// Parameters for the `list_pull_request_reviews` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListReviewsParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull-request number.
+    pub index: i64,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Lists the reviews on a pull request (approve / request-changes / comment verdicts and
+/// their summary bodies). Inline line comments are reported only as `comments_count`.
+pub async fn list_pull_request_reviews(
+    forge: &Forge,
+    params: ListReviewsParams,
+) -> Result<CallToolResult, McpError> {
+    let (raw, total) = forge
+        .list_pull_request_reviews(
+            &params.owner,
+            &params.repo,
+            params.index,
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    let reviews: Vec<RawReview> = decode(raw)?;
+    let items: Vec<ReviewSummary> = reviews.into_iter().map(summarize_review).collect();
+    paged_result(params.page, params.limit, total, &items)
+}
+
 // --- write tools (require write mode; see crate::server) ---
 
 /// Parameters for the `enable_write_mode` tool.

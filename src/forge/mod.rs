@@ -296,6 +296,22 @@ impl Forge {
         .await
     }
 
+    /// `GET /repos/{owner}/{repo}/pulls/{index}/reviews` — reviews on a pull request.
+    pub async fn list_pull_request_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.get_list(
+            &format!("repos/{owner}/{repo}/pulls/{index}/reviews"),
+            &paging(page, limit),
+        )
+        .await
+    }
+
     // --- write endpoints ---
 
     /// `POST /user/repos` — create a repository for the authenticated user.

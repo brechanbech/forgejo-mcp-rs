@@ -270,6 +270,17 @@ impl ForgejoMcp {
         tools::list_issue_comments(&self.forgejo, params).await
     }
 
+    /// Lists the reviews on a pull request.
+    #[tool(
+        description = "List the reviews on a pull request — approve/request-changes/comment verdicts and their summary bodies (owner/repo/index; optional page/limit). Inline line comments are reported only as a count."
+    )]
+    async fn list_pull_request_reviews(
+        &self,
+        Parameters(params): Parameters<tools::ListReviewsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_pull_request_reviews(&self.forgejo, params).await
+    }
+
     // --- write mode (deliberate, time-boxed elevation) ---
 
     /// Reports write-mode status (always available).
