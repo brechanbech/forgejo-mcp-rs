@@ -93,6 +93,19 @@ deliberately deferred until the read surface is validated.
 bad request) becomes `invalid_params` (the caller's problem); everything else becomes
 `internal_error`.
 
+## Concurrency & testing
+
+The server handles concurrent requests (rmcp's default). The read tools share no mutable
+state, so parallel calls are safe — there is no per-file serialization concern (unlike a
+file-mutating server).
+
+One testing caveat, **not** a server limitation: a slow upstream call (Codeberg's repo
+search can take ~6 s) is cut off only if the client closes stdin while the request is still
+in flight — on disconnect, rmcp drains in-flight responses for ~5 s, then quits. Real MCP
+clients keep the stdio connection open for the whole session, so this affects only ad-hoc
+`printf … | forgejo-mcp-rs` testing. When testing that way, keep stdin open (or test through
+a real client) so slow responses can return.
+
 ## Non-goals
 
 - Not a full Forgejo SDK — only the read surface the assistant needs. `forgejo-api` is the
