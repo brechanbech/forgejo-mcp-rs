@@ -15,6 +15,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use std::pin::Pin;
+
 use crate::forge::{Forge, ForgeError};
 
 /// Maps a [`ForgeError`] to an MCP error. Caller-side rejections (bad token, missing repo,
@@ -68,9 +70,10 @@ pub(crate) fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, Mcp
 ///      rows at offset 30) — overlaps rows 30–49 and silently skips everything past the
 ///      shorter walk. This is a Forgejo API quirk, not something we can fix in the request.
 ///
-/// TODO: make the list tools (`list_my_repos`, `list_issues`, …) auto-paginate internally —
-/// loop with a fixed effective page size until `returned < limit` or `total` is reached, and
-/// return the aggregated set — so an LLM caller never has to manage offsets at all.
+/// To sidestep this, the list tools auto-paginate by default: called with no `page` and no
+/// `limit`, they walk every page via [`gather_all`] and return the full aggregated set (with a
+/// `truncated` flag instead of a `page`/`limit` echo). Passing an explicit `page` or `limit`
+/// opts back into the single-page behavior this function formats, offsets and all.
 fn paged_result<T: Serialize>(
     page: Option<u32>,
     limit: Option<u32>,
@@ -83,6 +86,90 @@ fn paged_result<T: Serialize>(
         "returned": items.len(),
         "total": total,
         "items": items,
+    }))
+}
+
+/// Per-request page size used while auto-paginating. The server clamps to its own maximum
+/// (50 on Codeberg); that is fine — [`gather_all`] discovers the *effective* size from the
+/// first page rather than assuming this value was honored.
+const AUTO_PAGE_SIZE: u32 = 50;
+
+/// Safety cap: stop auto-paginating after this many items even if more remain, so a huge
+/// account can't produce an unbounded response. Surfaced as `truncated` when hit.
+const AUTO_PAGE_MAX_ITEMS: usize = 1000;
+
+/// One boxed page fetch, so [`gather_all`] can call it in a loop while the future borrows the
+/// [`Forge`] (and any request params). Yields the raw array plus `X-Total-Count`, when present.
+type PageFetch<'a> =
+    Pin<Box<dyn Future<Output = Result<(Value, Option<usize>), ForgeError>> + Send + 'a>>;
+
+/// The full result of walking every page of a list endpoint.
+struct Gathered {
+    items: Vec<Value>,
+    total: Option<usize>,
+    truncated: bool,
+}
+
+/// Walks a list endpoint to completion, sidestepping the offset-pagination footgun documented
+/// on [`paged_result`]: it drives every page itself with one fixed page size, so successive
+/// pages can neither overlap nor skip rows. It stops when the endpoint is exhausted — via
+/// `X-Total-Count` when reported, otherwise a short final page (shorter than the first page's
+/// length, the effective server page size) — or when [`AUTO_PAGE_MAX_ITEMS`] is reached.
+async fn gather_all<'a, F>(mut fetch: F) -> Result<Gathered, ForgeError>
+where
+    F: FnMut(u32, u32) -> PageFetch<'a>,
+{
+    let mut items: Vec<Value> = Vec::new();
+    let mut total: Option<usize> = None;
+    let mut effective: Option<usize> = None;
+    let mut truncated = false;
+    let mut page: u32 = 1;
+
+    loop {
+        let (value, page_total) = fetch(page, AUTO_PAGE_SIZE).await?;
+        if page_total.is_some() {
+            total = page_total;
+        }
+        let batch = into_items(value);
+        let got = batch.len();
+        // The first page reveals the server's effective page size (it may clamp below our
+        // request); later short pages are how we detect the end when there's no total.
+        let eff = *effective.get_or_insert(got);
+        items.extend(batch);
+
+        if got == 0 {
+            break; // server has no more rows
+        }
+        if let Some(t) = total
+            && items.len() >= t
+        {
+            break; // collected everything the count promised
+        }
+        if got < eff {
+            break; // a short page — this was the last one
+        }
+        if items.len() >= AUTO_PAGE_MAX_ITEMS {
+            truncated = true;
+            break;
+        }
+        page = page.saturating_add(1);
+    }
+
+    Ok(Gathered {
+        items,
+        total,
+        truncated,
+    })
+}
+
+/// Formats an auto-paginated set. No `page`/`limit` (the whole list is here); `truncated` is
+/// `true` only if the safety cap stopped collection before the end.
+fn gathered_result(gathered: &Gathered) -> Result<CallToolResult, McpError> {
+    json_result(&serde_json::json!({
+        "returned": gathered.items.len(),
+        "total": gathered.total,
+        "truncated": gathered.truncated,
+        "items": gathered.items,
     }))
 }
 
@@ -161,6 +248,14 @@ fn parse_state(state: &str) -> Result<&'static str, McpError> {
 
 /// Lists the authenticated user's repositories.
 pub async fn list_my_repos(forge: &Forge, params: PageParams) -> Result<CallToolResult, McpError> {
+    // With no explicit paging, walk every page so the caller gets the complete set; an
+    // explicit page or limit opts back into single-page control.
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| Box::pin(forge.list_my_repos(Some(page), Some(limit))))
+            .await
+            .map_err(to_mcp)?;
+        return gathered_result(&all);
+    }
     // The list endpoints carry the full count in the `X-Total-Count` header.
     let (repos, total) = forge
         .list_my_repos(params.page, params.limit)
@@ -175,6 +270,14 @@ pub async fn list_issues(
     params: ListItemsParams,
 ) -> Result<CallToolResult, McpError> {
     let state = params.state.as_deref().map(parse_state).transpose()?;
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| {
+            Box::pin(forge.list_issues(&params.owner, &params.repo, state, Some(page), Some(limit)))
+        })
+        .await
+        .map_err(to_mcp)?;
+        return gathered_result(&all);
+    }
     let (issues, total) = forge
         .list_issues(
             &params.owner,
@@ -203,6 +306,20 @@ pub async fn list_pull_requests(
     params: ListItemsParams,
 ) -> Result<CallToolResult, McpError> {
     let state = params.state.as_deref().map(parse_state).transpose()?;
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| {
+            Box::pin(forge.list_pull_requests(
+                &params.owner,
+                &params.repo,
+                state,
+                Some(page),
+                Some(limit),
+            ))
+        })
+        .await
+        .map_err(to_mcp)?;
+        return gathered_result(&all);
+    }
     let (prs, total) = forge
         .list_pull_requests(
             &params.owner,
