@@ -7,8 +7,9 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server for
 an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
 repositories, issues, and pull requests — over the Forgejo REST API.
 
-> Status: **read-only by default, with opt-in guarded writes (v0.2).** Seven read tools
-> (user, repos, issues, pull requests, search) plus repository management (`create_repo` /
+> Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
+> the forge — user, repos, issues, pull requests, search, orgs, notifications, comments, and
+> reviews — plus guarded writes (`create_repo`, `create_issue`, `comment_on_issue`,
 > `delete_repo`) gated behind a separate write token and a deliberate, time-boxed **write
 > mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
@@ -81,7 +82,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | Tool | Status | Notes |
 |---|---|---|
 | `whoami` | ✅ read | The authenticated user (verifies the token) |
-| `list_my_repos` | ✅ read | Your repositories (first page) |
+| `list_my_repos` | ✅ read | Your repositories (auto-paginated, slimmed) |
 | `list_issues` / `get_issue` | ✅ read | Issues in `owner/repo` (open by default) |
 | `list_pull_requests` / `get_pull_request` | ✅ read | Pull requests in `owner/repo` (open by default) |
 | `search_repos` | ✅ read | Repository search by keyword |
@@ -96,12 +97,14 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `comment_on_issue` | ✅ **write** | Comment on an issue/PR (owner/repo/index/body) |
 | `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 
-Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`, and
-return a `{ page, limit, returned, total, items }` envelope so paging is self-describing —
-`total` lets the caller tell whether more pages remain (it's `null` for `search_repos`,
-which doesn't report a count). Sort/other filters and slimmed output aren't exposed yet. The
-**write** tools require write mode (above). `edit_repo` and issue/PR writes are future work —
-see the [specification](SPECIFICATION.md).
+Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
+with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole
+set and return a `{ returned, total, truncated, items }` envelope; pass an explicit `page` or
+`limit` for a single page, which returns `{ page, limit, returned, total, items }` instead
+(`total` is `null` for `search_repos`, which reports no count). Repository, notification,
+comment, and review results are slimmed to the fields that matter. The **write** tools require
+write mode (above); `edit_repo` and editing existing issues/PRs are future work — see the
+[specification](SPECIFICATION.md).
 
 ## Security
 
