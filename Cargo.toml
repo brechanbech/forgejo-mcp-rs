@@ -9,6 +9,8 @@ license = "MIT"
 repository = "https://codeberg.org/brechanbech/forgejo-mcp-rs"
 authors = ["Stefan Ractliffe"]
 readme = "README.md"
+keywords = ["mcp", "forgejo", "codeberg", "git", "ai"]
+categories = ["development-tools", "api-bindings"]
 
 [[bin]]
 name = "forgejo-mcp-rs"

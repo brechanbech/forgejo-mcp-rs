@@ -132,4 +132,11 @@ client and carries no third-party forge SDK.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [LICENSE.md](LICENSE.md) for details.
+
+## MCP registry
+
+Ownership-verification token for the [MCP registry](https://registry.modelcontextprotocol.io)
+(read from this crate's rendered README on crates.io):
+
+> Registry ownership token: `mcp-name: io.github.brechanbech/forgejo-mcp-rs`
