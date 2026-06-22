@@ -54,6 +54,23 @@ pub(crate) fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, Mcp
 
 /// Wraps a page of list results with pagination metadata, so the caller can tell where it
 /// is and whether more remain. `total` is the full count when the endpoint reports it.
+///
+/// KNOWN LIMITATION (offset pagination + server-side caps). Forgejo paginates by offset
+/// (`offset = (page-1) * limit`) and clamps page size to the instance maximum — on Codeberg
+/// that is 50, and when `limit` is omitted the server falls back to its default of 30. Two
+/// consequences a caller must know about:
+///   1. The `limit` echoed here is the *requested* value, not the *effective* page size the
+///      server used. Asking for `limit=100` returns at most 50, but the response still says
+///      `limit: 100`. Trust `returned` + `total` to tell whether more pages remain.
+///   2. Because pages are position-based, walking them only yields a complete, duplicate-free
+///      set if EVERY page uses the *same* `limit` (≤ the server max). Mixing limits across
+///      calls — e.g. `limit=100` on page 1 (→50 rows) then an omitted limit on page 2 (→30
+///      rows at offset 30) — overlaps rows 30–49 and silently skips everything past the
+///      shorter walk. This is a Forgejo API quirk, not something we can fix in the request.
+///
+/// TODO: make the list tools (`list_my_repos`, `list_issues`, …) auto-paginate internally —
+/// loop with a fixed effective page size until `returned < limit` or `total` is reached, and
+/// return the aggregated set — so an LLM caller never has to manage offsets at all.
 fn paged_result<T: Serialize>(
     page: Option<u32>,
     limit: Option<u32>,
