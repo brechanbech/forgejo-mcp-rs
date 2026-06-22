@@ -1,0 +1,30 @@
+name: Close PRs (read-only mirror)
+
+# This repository is a read-only mirror of the canonical project on Codeberg.
+# GitHub does not allow disabling pull requests, so this workflow politely
+# closes any PR opened here and redirects contributors to Codeberg.
+#
+# The `if: github.server_url` guard ensures the job ONLY runs on GitHub. This
+# file is mirrored to Codeberg as well, where it stays inert — so it never
+# touches the real pull requests on the canonical repository.
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close PR and redirect to Codeberg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ github.event.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr close "$NUMBER" -R "$REPO" --comment \
+            "Thanks for your interest! This is a **read-only mirror**. The canonical repository lives on Codeberg — please open issues and pull requests there: https://codeberg.org/brechanbech/${REPO##*/}"
