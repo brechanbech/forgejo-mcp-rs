@@ -164,12 +164,16 @@ where
 
 /// Formats an auto-paginated set. No `page`/`limit` (the whole list is here); `truncated` is
 /// `true` only if the safety cap stopped collection before the end.
-fn gathered_result(gathered: &Gathered) -> Result<CallToolResult, McpError> {
+fn gathered_result<T: Serialize>(
+    items: &[T],
+    total: Option<usize>,
+    truncated: bool,
+) -> Result<CallToolResult, McpError> {
     json_result(&serde_json::json!({
-        "returned": gathered.items.len(),
-        "total": gathered.total,
-        "truncated": gathered.truncated,
-        "items": gathered.items,
+        "returned": items.len(),
+        "total": total,
+        "truncated": truncated,
+        "items": items,
     }))
 }
 
@@ -246,6 +250,57 @@ fn parse_state(state: &str) -> Result<&'static str, McpError> {
     }
 }
 
+/// A slimmed repository — the fields worth returning from a list, dropping the ~80-field full
+/// Forgejo repo object (nested `owner`, `permissions`, `internal_tracker`, dozens of URLs and
+/// flags) so the complete set stays compact. Deserializes from the raw API object (unknown
+/// fields ignored) and re-serializes with the same names, omitting any that are absent.
+#[derive(Debug, serde::Deserialize, Serialize)]
+struct RepoSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fork: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stars_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forks_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    watchers_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_issues_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_pr_counter: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clone_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+/// Projects raw repository objects down to [`RepoSummary`]. Each is an all-optional shape, so a
+/// well-formed object never fails to deserialize; anything that somehow does is skipped.
+fn slim_repos(items: Vec<Value>) -> Vec<RepoSummary> {
+    items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect()
+}
+
 /// Lists the authenticated user's repositories.
 pub async fn list_my_repos(forge: &Forge, params: PageParams) -> Result<CallToolResult, McpError> {
     // With no explicit paging, walk every page so the caller gets the complete set; an
@@ -254,14 +309,19 @@ pub async fn list_my_repos(forge: &Forge, params: PageParams) -> Result<CallTool
         let all = gather_all(|page, limit| Box::pin(forge.list_my_repos(Some(page), Some(limit))))
             .await
             .map_err(to_mcp)?;
-        return gathered_result(&all);
+        return gathered_result(&slim_repos(all.items), all.total, all.truncated);
     }
     // The list endpoints carry the full count in the `X-Total-Count` header.
     let (repos, total) = forge
         .list_my_repos(params.page, params.limit)
         .await
         .map_err(to_mcp)?;
-    paged_result(params.page, params.limit, total, &into_items(repos))
+    paged_result(
+        params.page,
+        params.limit,
+        total,
+        &slim_repos(into_items(repos)),
+    )
 }
 
 /// Lists issues in `owner/repo` (open issues by default).
@@ -276,7 +336,7 @@ pub async fn list_issues(
         })
         .await
         .map_err(to_mcp)?;
-        return gathered_result(&all);
+        return gathered_result(&all.items, all.total, all.truncated);
     }
     let (issues, total) = forge
         .list_issues(
@@ -318,7 +378,7 @@ pub async fn list_pull_requests(
         })
         .await
         .map_err(to_mcp)?;
-        return gathered_result(&all);
+        return gathered_result(&all.items, all.total, all.truncated);
     }
     let (prs, total) = forge
         .list_pull_requests(
@@ -748,4 +808,105 @@ pub async fn comment_on_issue(
         .map_err(to_mcp)?;
     let comment: RawComment = decode(raw)?;
     json_result(&summarize_comment(comment))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A page of `n` placeholder repo objects — enough for the gather loop to count.
+    fn page(n: usize) -> Value {
+        Value::Array(
+            (0..n)
+                .map(|i| serde_json::json!({ "full_name": format!("o/r{i}") }))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn gather_all_stops_at_reported_total() {
+        // 50 + 50 + 25 = 125, with the total reported on every page.
+        let pages = [page(50), page(50), page(25)];
+        let g = gather_all(|p, _limit| {
+            let body = pages.get(p as usize - 1).cloned();
+            Box::pin(async move {
+                Ok::<_, ForgeError>((body.unwrap_or_else(|| page(0)), Some(125usize)))
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(g.items.len(), 125);
+        assert_eq!(g.total, Some(125));
+        assert!(!g.truncated);
+    }
+
+    #[tokio::test]
+    async fn gather_all_survives_server_clamp_without_total() {
+        // No total reported, and the server clamps to 30/page (below our 50 request). The loop
+        // must NOT stop after page 1 just because 30 < the requested 50 — it compares against
+        // the effective first-page size and ends only on the genuinely short final page.
+        let pages = [page(30), page(30), page(10)];
+        let g = gather_all(|p, _limit| {
+            let body = pages.get(p as usize - 1).cloned();
+            Box::pin(async move { Ok::<_, ForgeError>((body.unwrap_or_else(|| page(0)), None)) })
+        })
+        .await
+        .unwrap();
+        assert_eq!(g.items.len(), 70);
+        assert_eq!(g.total, None);
+        assert!(!g.truncated);
+    }
+
+    #[tokio::test]
+    async fn gather_all_truncates_at_safety_cap() {
+        // Always a full page, never a total: only AUTO_PAGE_MAX_ITEMS stops the walk.
+        let g = gather_all(|_p, limit| {
+            Box::pin(async move { Ok::<_, ForgeError>((page(limit as usize), None)) })
+        })
+        .await
+        .unwrap();
+        assert!(g.truncated);
+        assert!(g.items.len() >= AUTO_PAGE_MAX_ITEMS);
+    }
+
+    #[tokio::test]
+    async fn gather_all_handles_empty_first_page() {
+        let g = gather_all(|_p, _limit| {
+            Box::pin(async { Ok::<_, ForgeError>((page(0), Some(0usize))) })
+        })
+        .await
+        .unwrap();
+        assert_eq!(g.items.len(), 0);
+        assert!(!g.truncated);
+    }
+
+    #[test]
+    fn slim_repos_keeps_summary_fields_and_drops_the_rest() {
+        let raw = vec![serde_json::json!({
+            "full_name": "brechanbech/sec-mcp",
+            "description": "MCP server for SEC EDGAR data",
+            "language": "Rust",
+            "stars_count": 0,
+            "forks_count": 0,
+            "open_issues_count": 0,
+            "html_url": "https://codeberg.org/brechanbech/sec-mcp",
+            // Verbose/nested fields that must NOT survive the slim:
+            "owner": { "login": "brechanbech", "email": "person@example.com" },
+            "internal_tracker": { "enable_time_tracker": true },
+            "permissions": { "admin": true }
+        })];
+        let slim = slim_repos(raw);
+        assert_eq!(slim.len(), 1);
+
+        let v = serde_json::to_value(&slim[0]).unwrap();
+        assert_eq!(v["full_name"], "brechanbech/sec-mcp");
+        assert_eq!(v["language"], "Rust");
+        assert_eq!(v["stars_count"], 0);
+        // Nested objects (and the owner's email) are dropped.
+        assert!(v.get("owner").is_none());
+        assert!(v.get("internal_tracker").is_none());
+        assert!(v.get("permissions").is_none());
+        // Absent optional fields are omitted, not serialized as null.
+        assert!(v.get("private").is_none());
+    }
 }
