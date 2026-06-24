@@ -175,6 +175,21 @@ impl Forge {
 
     // --- read endpoints ---
 
+    /// The configured instance base URL (the API root with the `api/v1/` suffix trimmed),
+    /// for display — e.g. `https://codeberg.org/`.
+    pub fn base_url(&self) -> String {
+        self.api_root
+            .as_str()
+            .strip_suffix(API_PREFIX)
+            .unwrap_or_else(|| self.api_root.as_str())
+            .to_owned()
+    }
+
+    /// `GET /version` — the Forgejo/Gitea instance software version.
+    pub async fn server_version(&self) -> Result<Value, ForgeError> {
+        self.get("version", &[]).await
+    }
+
     /// `GET /user` — the authenticated user.
     pub async fn user_get_current(&self) -> Result<Value, ForgeError> {
         self.get("user", &[]).await

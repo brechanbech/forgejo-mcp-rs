@@ -82,6 +82,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | Tool | Status | Notes |
 |---|---|---|
 | `whoami` | ✅ read | The authenticated user (verifies the token) |
+| `version` | ✅ read | This MCP server's version + the connected Forgejo instance's version |
 | `list_my_repos` | ✅ read | Your repositories (auto-paginated, slimmed) |
 | `list_issues` / `get_issue` | ✅ read | Issues in `owner/repo` (open by default) |
 | `list_pull_requests` / `get_pull_request` | ✅ read | Pull requests in `owner/repo` (open by default) |

@@ -183,6 +183,27 @@ pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
     json_result(&user)
 }
 
+/// Reports this MCP server's own version plus the Forgejo instance version it talks to.
+///
+/// The MCP-server version is compiled in (no network), so it's reported even if the instance
+/// call fails — in which case `forgejo` carries the error text instead of a version string.
+pub async fn version(forge: &Forge) -> Result<CallToolResult, McpError> {
+    let mcp_server = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
+    let forgejo = match forge.server_version().await {
+        Ok(value) => value
+            .get("version")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "unknown".to_owned()),
+        Err(e) => format!("unavailable: {e}"),
+    };
+    json_result(&serde_json::json!({
+        "mcp_server": mcp_server,
+        "forgejo": forgejo,
+        "url": forge.base_url(),
+    }))
+}
+
 /// An item within a repository addressed by number (an issue or pull-request index).
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct RepoItemRef {

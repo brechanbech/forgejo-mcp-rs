@@ -181,6 +181,14 @@ impl ForgejoMcp {
         tools::whoami(&self.forgejo).await
     }
 
+    /// Reports this MCP server's version and the Forgejo instance version.
+    #[tool(
+        description = "Report this MCP server's version and the connected Forgejo instance's version"
+    )]
+    async fn version(&self) -> Result<CallToolResult, McpError> {
+        tools::version(&self.forgejo).await
+    }
+
     /// Lists the authenticated user's repositories.
     #[tool(description = "List the authenticated user's repositories (optional page/limit)")]
     async fn list_my_repos(
