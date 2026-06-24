@@ -1,0 +1,23 @@
+#!/bin/sh
+# Pre-commit gate: auto-format staged Rust before the commit lands, so a commit is always
+# fmt-clean and the pre-push `cargo fmt --check` never rejects it.
+# POSIX sh for portability (macOS/FreeBSD). Bypass in a pinch with `git commit --no-verify`.
+#
+# Activate once per clone:  git config core.hooksPath .githooks
+set -e
+
+# Only act when Rust files are staged (added/copied/modified).
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+[ -z "$staged_rs" ] && exit 0
+
+echo "pre-commit: fmt"
+cargo fmt
+
+# Re-stage the files we were already committing, now formatted. We touch only paths that were
+# already staged, so unrelated reformatting elsewhere in the tree is left for you to stage.
+# Caveat: if a .rs file was *partially* staged, this restages the whole file.
+echo "$staged_rs" | while IFS= read -r f; do
+	[ -f "$f" ] && git add -- "$f"
+done
+
+echo "pre-commit: staged Rust formatted"
