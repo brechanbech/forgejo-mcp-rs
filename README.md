@@ -9,8 +9,8 @@ repositories, issues, and pull requests — over the Forgejo REST API.
 
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
 > the forge — user, repos, issues, pull requests, search, orgs, notifications, comments, and
-> reviews — plus guarded writes (`create_repo`, `create_issue`, `comment_on_issue`,
-> `delete_repo`) gated behind a separate write token and a deliberate, time-boxed **write
+> reviews — plus guarded writes (`create_repo`, `create_issue`, `create_pull_request`,
+> `comment_on_issue`, `delete_repo`) gated behind a separate write token and a deliberate, time-boxed **write
 > mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
 It speaks the Forgejo REST API directly through a small, in-house client (`src/forge/`) — an
@@ -94,6 +94,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `enable_write_mode` / `disable_write_mode` | ✅ | Enter/leave the time-boxed write mode |
 | `create_repo` | ✅ **write** | Create a repo (defaults to private) |
 | `create_issue` | ✅ **write** | Create an issue (owner/repo/title, optional body) |
+| `create_pull_request` | ✅ **write** | Open a PR (owner/repo/title/head/base, optional body) |
 | `comment_on_issue` | ✅ **write** | Comment on an issue/PR (owner/repo/index/body) |
 | `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 

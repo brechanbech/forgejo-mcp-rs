@@ -783,6 +783,43 @@ pub async fn create_issue(
     json_result(&issue)
 }
 
+/// Parameters for the `create_pull_request` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CreatePullRequestParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull-request title.
+    pub title: String,
+    /// Source branch — the branch with your changes. For a cross-repo PR use `user:branch`.
+    pub head: String,
+    /// Target branch the changes should be merged into (e.g. `main`).
+    pub base: String,
+    /// Pull-request body (Markdown). Optional.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// Opens a pull request in `owner/repo` from `head` into `base`.
+pub async fn create_pull_request(
+    forge: &Forge,
+    params: CreatePullRequestParams,
+) -> Result<CallToolResult, McpError> {
+    let mut body = serde_json::Map::new();
+    body.insert("title".to_owned(), Value::String(params.title));
+    body.insert("head".to_owned(), Value::String(params.head));
+    body.insert("base".to_owned(), Value::String(params.base));
+    if let Some(text) = params.body {
+        body.insert("body".to_owned(), Value::String(text));
+    }
+    let pull = forge
+        .create_pull_request(&params.owner, &params.repo, &Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&pull)
+}
+
 /// Parameters for the `comment_on_issue` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct CommentOnIssueParams {

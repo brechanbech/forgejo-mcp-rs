@@ -330,6 +330,17 @@ impl Forge {
             .await
     }
 
+    /// `POST /repos/{owner}/{repo}/pulls` — open a pull request.
+    pub async fn create_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.post(&format!("repos/{owner}/{repo}/pulls"), body)
+            .await
+    }
+
     /// `POST /repos/{owner}/{repo}/issues/{index}/comments` — comment on an issue or PR.
     pub async fn comment_on_issue(
         &self,

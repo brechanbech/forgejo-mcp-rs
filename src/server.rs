@@ -367,6 +367,21 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    /// Opens a pull request from one branch into another.
+    #[tool(
+        description = "Open a pull request in a repository (owner/repo/title/head/base, optional body; requires write mode)"
+    )]
+    async fn create_pull_request(
+        &self,
+        Parameters(params): Parameters<tools::CreatePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::create_pull_request(client, params).await?;
+        self.extend_window();
+        result.content.push(Content::text(self.window_note()));
+        Ok(result)
+    }
+
     /// Adds a comment to an issue or pull request.
     #[tool(
         description = "Comment on an issue or pull request (owner/repo/index/body; requires write mode)"
