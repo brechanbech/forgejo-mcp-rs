@@ -58,4 +58,10 @@ rm -f /tmp/forgejo-write-mode-test
 - `refreshInterval` is in **seconds** (minimum 1); 5 is a reasonable default.
 - If new write tools are added to the server, add them to the hook `matcher` so the window keeps
   sliding the indicator forward on those calls.
+- **Payload escaping:** Claude Code delivers an MCP tool's result to `PostToolUse` as a
+  *JSON-escaped string* inside a `tool_response` array — so the server's JSON reaches the hook as
+  e.g. `\"minutes_remaining\": 9` (backslash-escaped quotes, whitespace after the colon). The
+  hook's matchers therefore anchor on the key *name* and bridge to the number with a non-digit
+  run, rather than matching a literal `"minutes_remaining":`. Keep this in mind if you adapt the
+  patterns: don't assume the keys appear unescaped.
 - Uninstall: delete `~/.claude/forgejo-mcp/` and remove the `statusLine`/`hooks` keys.
