@@ -8,6 +8,8 @@
 //! through, while list endpoints that we slim (notifications, comments) deserialize into
 //! local shapes first.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
@@ -193,8 +195,7 @@ pub async fn version(forge: &Forge) -> Result<CallToolResult, McpError> {
         Ok(value) => value
             .get("version")
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "unknown".to_owned()),
+            .map_or_else(|| "unknown".to_owned(), ToOwned::to_owned),
         Err(e) => format!("unavailable: {e}"),
     };
     json_result(&serde_json::json!({
@@ -213,6 +214,44 @@ pub struct RepoItemRef {
     pub repo: String,
     /// Issue or pull-request number.
     pub index: i64,
+}
+
+/// A repository addressed by owner and name.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RepoRef {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+/// Parameters for listing branches in a repository.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListBranchesParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Parameters for reading a file's contents from a repository.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct FileContentsParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Path to the file within the repository, e.g. `src/main.rs`.
+    pub path: String,
+    /// Branch, tag, or commit to read from. Defaults to the repository's default branch.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
 }
 
 /// Parameters for listing issues or pull requests in a repository.
@@ -343,6 +382,144 @@ pub async fn list_my_repos(forge: &Forge, params: PageParams) -> Result<CallTool
         total,
         &slim_repos(into_items(repos)),
     )
+}
+
+/// Gets one repository's details (slimmed to the same fields as `list_my_repos`).
+pub async fn get_repo(forge: &Forge, params: RepoRef) -> Result<CallToolResult, McpError> {
+    let repo = forge
+        .get_repo(&params.owner, &params.repo)
+        .await
+        .map_err(to_mcp)?;
+    let summary: RepoSummary = decode(repo)?;
+    json_result(&summary)
+}
+
+/// A branch reduced to its name, head commit, and protection flag.
+#[derive(Debug, Serialize)]
+struct BranchSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protected: Option<bool>,
+}
+
+/// Projects raw branch objects down to [`BranchSummary`], pulling the head SHA out of the
+/// nested `commit.id`.
+fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
+    items
+        .into_iter()
+        .map(|b| BranchSummary {
+            name: b.get("name").and_then(Value::as_str).map(ToOwned::to_owned),
+            commit: b
+                .pointer("/commit/id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            protected: b.get("protected").and_then(Value::as_bool),
+        })
+        .collect()
+}
+
+/// Lists branches in `owner/repo` (auto-paginated unless an explicit page/limit is given).
+pub async fn list_branches(
+    forge: &Forge,
+    params: ListBranchesParams,
+) -> Result<CallToolResult, McpError> {
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| {
+            Box::pin(forge.list_branches(&params.owner, &params.repo, Some(page), Some(limit)))
+        })
+        .await
+        .map_err(to_mcp)?;
+        return gathered_result(&slim_branches(all.items), all.total, all.truncated);
+    }
+    let (branches, total) = forge
+        .list_branches(&params.owner, &params.repo, params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(
+        params.page,
+        params.limit,
+        total,
+        &slim_branches(into_items(branches)),
+    )
+}
+
+/// Reads a file's contents (or lists a directory) from `owner/repo`. For a file the base64 body
+/// is decoded: UTF-8 text is returned inline; binary content is reported by size, not dumped.
+pub async fn get_file_contents(
+    forge: &Forge,
+    params: FileContentsParams,
+) -> Result<CallToolResult, McpError> {
+    let raw = forge
+        .get_contents(
+            &params.owner,
+            &params.repo,
+            &params.path,
+            params.git_ref.as_deref(),
+        )
+        .await
+        .map_err(to_mcp)?;
+
+    // A directory comes back as an array of entries; slim each to name/path/type.
+    if let Value::Array(entries) = raw {
+        let listing: Vec<Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "name": e.get("name"),
+                    "path": e.get("path"),
+                    "type": e.get("type"),
+                })
+            })
+            .collect();
+        return json_result(&serde_json::json!({ "type": "dir", "entries": listing }));
+    }
+
+    // A file carries its body as base64 in `content` (whitespace-wrapped on some instances).
+    let mut out = serde_json::Map::new();
+    out.insert("type".to_owned(), Value::String("file".to_owned()));
+    for key in ["path", "sha", "size"] {
+        if let Some(v) = raw.get(key) {
+            out.insert(key.to_owned(), v.clone());
+        }
+    }
+    let decoded = match (
+        raw.get("encoding").and_then(Value::as_str),
+        raw.get("content").and_then(Value::as_str),
+    ) {
+        (Some("base64"), Some(c)) => {
+            let stripped: String = c.chars().filter(|ch| !ch.is_whitespace()).collect();
+            BASE64.decode(stripped).ok()
+        }
+        _ => None,
+    };
+    match decoded {
+        Some(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => {
+                out.insert("encoding".to_owned(), Value::String("utf-8".to_owned()));
+                out.insert("content".to_owned(), Value::String(text));
+            }
+            Err(e) => {
+                out.insert("encoding".to_owned(), Value::String("binary".to_owned()));
+                out.insert(
+                    "note".to_owned(),
+                    Value::String(format!(
+                        "binary file ({} bytes); content omitted",
+                        e.as_bytes().len()
+                    )),
+                );
+            }
+        },
+        None => {
+            out.insert(
+                "note".to_owned(),
+                Value::String("no decodable base64 content".to_owned()),
+            );
+        }
+    }
+    json_result(&Value::Object(out))
 }
 
 /// Lists issues in `owner/repo` (open issues by default).
@@ -802,6 +979,40 @@ pub async fn create_issue(
         .await
         .map_err(to_mcp)?;
     json_result(&issue)
+}
+
+/// Parameters for the `create_branch` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CreateBranchParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Name for the new branch.
+    pub new_branch: String,
+    /// Existing branch, tag, or commit to branch from. Defaults to the repo's default branch.
+    #[serde(default)]
+    pub old_ref: Option<String>,
+}
+
+/// Creates a branch in `owner/repo`, optionally from a given ref.
+pub async fn create_branch(
+    forge: &Forge,
+    params: CreateBranchParams,
+) -> Result<CallToolResult, McpError> {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "new_branch_name".to_owned(),
+        Value::String(params.new_branch),
+    );
+    if let Some(old) = params.old_ref {
+        body.insert("old_ref_name".to_owned(), Value::String(old));
+    }
+    let branch = forge
+        .create_branch(&params.owner, &params.repo, &Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&branch)
 }
 
 /// Parameters for the `create_pull_request` tool.

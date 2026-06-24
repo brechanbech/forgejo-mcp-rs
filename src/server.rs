@@ -238,6 +238,35 @@ impl ForgejoMcp {
         tools::get_pull_request(&self.forgejo, params).await
     }
 
+    /// Gets one repository's details.
+    #[tool(description = "Get one repository's details (owner/repo), including its default branch")]
+    async fn get_repo(
+        &self,
+        Parameters(params): Parameters<tools::RepoRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_repo(&self.forgejo, params).await
+    }
+
+    /// Lists branches in a repository.
+    #[tool(description = "List branches in a repository (owner/repo); auto-paginated, slimmed")]
+    async fn list_branches(
+        &self,
+        Parameters(params): Parameters<tools::ListBranchesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_branches(&self.forgejo, params).await
+    }
+
+    /// Reads a file's contents (or lists a directory) from a repository.
+    #[tool(
+        description = "Read a file's contents from a repository (owner/repo/path, optional ref); decodes text, lists directories"
+    )]
+    async fn get_file_contents(
+        &self,
+        Parameters(params): Parameters<tools::FileContentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_file_contents(&self.forgejo, params).await
+    }
+
     /// Searches repositories.
     #[tool(description = "Search repositories by keyword (optional page/limit)")]
     async fn search_repos(
@@ -370,6 +399,21 @@ impl ForgejoMcp {
     ) -> Result<CallToolResult, McpError> {
         let client = self.write_client()?;
         let mut result = tools::create_issue(client, params).await?;
+        self.extend_window();
+        result.content.push(Content::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Creates a branch, optionally from a given ref.
+    #[tool(
+        description = "Create a branch in a repository (owner/repo/new_branch, optional old_ref; requires write mode)"
+    )]
+    async fn create_branch(
+        &self,
+        Parameters(params): Parameters<tools::CreateBranchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::create_branch(client, params).await?;
         self.extend_window();
         result.content.push(Content::text(self.window_note()));
         Ok(result)

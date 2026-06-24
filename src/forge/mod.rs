@@ -204,6 +204,42 @@ impl Forge {
         self.get_list("user/repos", &paging(page, limit)).await
     }
 
+    /// `GET /repos/{owner}/{repo}` — one repository's details.
+    pub async fn get_repo(&self, owner: &str, repo: &str) -> Result<Value, ForgeError> {
+        self.get(&format!("repos/{owner}/{repo}"), &[]).await
+    }
+
+    /// `GET /repos/{owner}/{repo}/branches` — branches (paged).
+    pub async fn list_branches(
+        &self,
+        owner: &str,
+        repo: &str,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.get_list(
+            &format!("repos/{owner}/{repo}/branches"),
+            &paging(page, limit),
+        )
+        .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/contents/{path}` — file or directory metadata. For a file the
+    /// object carries the body as base64 in `content`; `git_ref` selects a branch/tag/commit.
+    pub async fn get_contents(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        git_ref: Option<&str>,
+    ) -> Result<Value, ForgeError> {
+        let query: Vec<(&str, String)> = git_ref
+            .map(|r| vec![("ref", r.to_owned())])
+            .unwrap_or_default();
+        self.get(&format!("repos/{owner}/{repo}/contents/{path}"), &query)
+            .await
+    }
+
     /// `GET /repos/{owner}/{repo}/issues` — issues, optionally filtered by `state`.
     pub async fn list_issues(
         &self,
@@ -342,6 +378,17 @@ impl Forge {
         body: &Value,
     ) -> Result<Value, ForgeError> {
         self.post(&format!("repos/{owner}/{repo}/issues"), body)
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/branches` — create a branch.
+    pub async fn create_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.post(&format!("repos/{owner}/{repo}/branches"), body)
             .await
     }
 
