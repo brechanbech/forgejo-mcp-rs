@@ -79,29 +79,29 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 
 ## Tools
 
-| Tool | Status | Notes |
+| Tool |  | Notes |
 |---|---|---|
-| `whoami` | ✅ read | The authenticated user (verifies the token) |
-| `version` | ✅ read | This MCP server's version + the connected Forgejo instance's version |
-| `list_my_repos` | ✅ read | Your repositories (auto-paginated, slimmed) |
-| `list_issues` / `get_issue` | ✅ read | Issues in `owner/repo` (open by default) |
-| `list_pull_requests` / `get_pull_request` | ✅ read | Pull requests in `owner/repo` (open by default) |
-| `get_repo` | ✅ read | One repository's details (incl. default branch), slimmed |
-| `list_branches` | ✅ read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
-| `get_file_contents` | ✅ read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`) |
-| `search_repos` | ✅ read | Repository search by keyword |
-| `list_orgs` | ✅ read | Organizations you belong to |
-| `list_notifications` | ✅ read | Your notification threads, slimmed (`all=true` for read+unread) |
-| `list_issue_comments` | ✅ read | Comments on an issue/PR (slimmed) |
-| `list_pull_request_reviews` | ✅ read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
-| `write_status` | ✅ read | Report write-mode state (token configured? active? minutes left?) |
-| `enable_write_mode` / `disable_write_mode` | ✅ | Enter/leave the time-boxed write mode |
-| `create_repo` | ✅ **write** | Create a repo (defaults to private) |
-| `create_branch` | ✅ **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
-| `create_issue` | ✅ **write** | Create an issue (owner/repo/title, optional body) |
-| `create_pull_request` | ✅ **write** | Open a PR (owner/repo/title/head/base, optional body) |
-| `comment_on_issue` | ✅ **write** | Comment on an issue/PR (owner/repo/index/body) |
-| `delete_repo` | ✅ **write** | Delete a repo (needs `confirm = "owner/repo"`) |
+| `whoami` | read | The authenticated user (verifies the token) |
+| `version` | read | This MCP server's version + the connected Forgejo instance's version |
+| `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
+| `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default) |
+| `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default) |
+| `get_repo` | read | One repository's details (incl. default branch), slimmed |
+| `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
+| `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`) |
+| `search_repos` | read | Repository search by keyword |
+| `list_orgs` | read | Organizations you belong to |
+| `list_notifications` | read | Your notification threads, slimmed (`all=true` for read+unread) |
+| `list_issue_comments` | read | Comments on an issue/PR (slimmed) |
+| `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
+| `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
+| `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
+| `create_repo` | **write** | Create a repo (defaults to private) |
+| `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
+| `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
+| `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |
+| `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |
+| `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole
