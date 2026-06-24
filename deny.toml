@@ -6,7 +6,9 @@ yanked = "deny"
 
 [licenses]
 # Keep the dependency tree permissive. If something copyleft sneaks in, fail loud.
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL"]
+# CDLA-Permissive-2.0 is the permissive data license on `webpki-roots` (the bundled Mozilla CA
+# list pulled in by reqwest's rustls backend).
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL", "CDLA-Permissive-2.0"]
 confidence-threshold = 0.9
 # The allow-list is a forward-looking policy, so don't warn when an allowed license
 # happens not to appear in the current tree.

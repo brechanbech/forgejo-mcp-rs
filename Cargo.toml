@@ -1,7 +1,7 @@
 [package]
 name = "forgejo-mcp-rs"
 description = "Model Context Protocol server for Forgejo / Codeberg, in Rust."
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 # 1.88: required by `time` >= 0.3.47, the first release fixing RUSTSEC-2026-0009.
 rust-version = "1.88"
@@ -37,7 +37,10 @@ pedantic = { level = "warn", priority = -1 }
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
 # --- Forgejo / Codeberg REST (in-house thin client over reqwest) ---
-reqwest = { version = "0.12", features = ["json"] }
+# rustls (bundled webpki roots) instead of the default native-tls: pure-Rust TLS, no Apple/
+# OpenSSL system dependency (portable to FreeBSD), and it drops the native-tls stack that pulled
+# two core-foundation majors. Private-CA instances would need `rustls-tls-native-roots` instead.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 zeroize = "1"
 
