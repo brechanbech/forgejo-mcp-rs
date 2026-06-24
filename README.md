@@ -50,7 +50,7 @@ The server is **read-only by default.** `create_repo` / `delete_repo` work only 
 `enable_write_mode` — a time-boxed elevation (default 10 min, max 60) that slides forward on
 each write and auto-reverts. `write_status` reports the state; `delete_repo` also requires a
 `confirm` argument equal to `"owner/repo"`. See [`SPECIFICATION.md`](SPECIFICATION.md#write-mode-deliberate-time-boxed-elevation)
-for the full design (and the honest "guardrail, not sandbox" caveat).
+for the full design.
 
 ### Wire it into Claude Code
 
