@@ -1,0 +1,17 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/forgejo-mcp/statusline.sh",
+    "refreshInterval": 5
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__forgejo__(enable_write_mode|disable_write_mode|write_status|create_repo|delete_repo|create_issue|create_pull_request|create_branch|comment_on_issue)",
+        "hooks": [
+          { "type": "command", "command": "~/.claude/forgejo-mcp/write-mode-hook.sh" }
+        ]
+      }
+    ]
+  }
+}
