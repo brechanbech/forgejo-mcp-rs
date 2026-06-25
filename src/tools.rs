@@ -1079,6 +1079,143 @@ pub async fn comment_on_issue(
     json_result(&summarize_comment(comment))
 }
 
+/// Default push-mirror sync interval (Forgejo duration syntax) when the caller omits one.
+const DEFAULT_MIRROR_INTERVAL: &str = "8h0m0s";
+
+/// Parameters for the `add_push_mirror` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct AddPushMirrorParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Target git URL to push to, e.g. `https://github.com/you/repo.git`.
+    pub remote_address: String,
+    /// Username on the remote (e.g. your GitHub username). Required for password auth; ignored
+    /// when `use_ssh` is true.
+    #[serde(default)]
+    pub remote_username: Option<String>,
+    /// Sync interval in Forgejo duration form (e.g. `8h0m0s`; `0` disables periodic sync).
+    /// Defaults to `8h0m0s`.
+    #[serde(default)]
+    pub interval: Option<String>,
+    /// Also push right after each push to this repo (near-real-time). Defaults to true.
+    #[serde(default)]
+    pub sync_on_commit: Option<bool>,
+    /// Optional glob branch filter (e.g. `main,release/*`); empty mirrors all branches.
+    #[serde(default)]
+    pub branch_filter: Option<String>,
+    /// Authenticate to the remote with an SSH key instead of a password token. When true no
+    /// username/token is sent and the response carries a `public_key` to add on the remote.
+    #[serde(default)]
+    pub use_ssh: Option<bool>,
+}
+
+/// Parameters for the `delete_push_mirror` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct DeletePushMirrorParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// The mirror's `remote_name` (as reported by `list_push_mirrors`).
+    pub remote_name: String,
+}
+
+/// Adds a push mirror to `owner/repo`. The push credential is supplied by the server via
+/// `FORGEJO_MIRROR_TOKEN` (`mirror_token`), never as a tool argument, so it stays out of the
+/// conversation; pass `use_ssh = true` to use key auth instead.
+pub async fn add_push_mirror(
+    forge: &Forge,
+    mirror_token: Option<&str>,
+    params: AddPushMirrorParams,
+) -> Result<CallToolResult, McpError> {
+    let use_ssh = params.use_ssh.unwrap_or(false);
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "remote_address".to_owned(),
+        Value::String(params.remote_address),
+    );
+    body.insert(
+        "interval".to_owned(),
+        Value::String(
+            params
+                .interval
+                .unwrap_or_else(|| DEFAULT_MIRROR_INTERVAL.to_owned()),
+        ),
+    );
+    body.insert(
+        "sync_on_commit".to_owned(),
+        Value::Bool(params.sync_on_commit.unwrap_or(true)),
+    );
+    body.insert("use_ssh".to_owned(), Value::Bool(use_ssh));
+    if let Some(filter) = params.branch_filter {
+        body.insert("branch_filter".to_owned(), Value::String(filter));
+    }
+    // Password auth needs a username and the server-held credential; SSH auth needs neither
+    // (Forgejo generates a deploy key, returned as `public_key` for you to add on the remote).
+    if !use_ssh {
+        let username = params.remote_username.ok_or_else(|| {
+            McpError::invalid_params(
+                "remote_username is required for password auth (or set use_ssh=true)".to_owned(),
+                None,
+            )
+        })?;
+        let token = mirror_token.ok_or_else(|| {
+            McpError::invalid_params(
+                "no push credential configured: set FORGEJO_MIRROR_TOKEN on the server to the \
+                 remote's password/token (e.g. a GitHub PAT with contents:write), or pass \
+                 use_ssh=true"
+                    .to_owned(),
+                None,
+            )
+        })?;
+        body.insert("remote_username".to_owned(), Value::String(username));
+        body.insert(
+            "remote_password".to_owned(),
+            Value::String(token.to_owned()),
+        );
+    }
+    // The PushMirror response never includes the password — safe to return verbatim.
+    let created = forge
+        .add_push_mirror(&params.owner, &params.repo, &Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&created)
+}
+
+/// Lists the push mirrors on `owner/repo` (secrets are never part of the response).
+pub async fn list_push_mirrors(forge: &Forge, params: RepoRef) -> Result<CallToolResult, McpError> {
+    let (raw, total) = forge
+        .list_push_mirrors(&params.owner, &params.repo, None, None)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(None, None, total, &into_items(raw))
+}
+
+/// Removes a push mirror from `owner/repo` by its `remote_name`.
+pub async fn delete_push_mirror(
+    forge: &Forge,
+    params: DeletePushMirrorParams,
+) -> Result<CallToolResult, McpError> {
+    forge
+        .delete_push_mirror(&params.owner, &params.repo, &params.remote_name)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&serde_json::json!({ "deleted": params.remote_name }))
+}
+
+/// Triggers an immediate sync of every push mirror on `owner/repo`.
+pub async fn sync_push_mirrors(forge: &Forge, params: RepoRef) -> Result<CallToolResult, McpError> {
+    forge
+        .sync_push_mirrors(&params.owner, &params.repo)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&serde_json::json!({
+        "sync_requested": format!("{}/{}", params.owner, params.repo),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

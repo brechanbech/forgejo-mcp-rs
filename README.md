@@ -10,7 +10,8 @@ repositories, issues, and pull requests — over the Forgejo REST API.
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
 > the forge — user, repos, issues, pull requests, search, orgs, notifications, comments, and
 > reviews — plus guarded writes (`create_repo`, `create_branch`, `create_issue`,
-> `create_pull_request`, `comment_on_issue`, `delete_repo`) gated behind a separate write token and a deliberate, time-boxed **write
+> `create_pull_request`, `comment_on_issue`, `delete_repo`, and push-mirror management) gated
+> behind a separate write token and a deliberate, time-boxed **write
 > mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
 It speaks the Forgejo REST API directly through a small, in-house client (`src/forge/`) — an
@@ -33,11 +34,12 @@ The server is configured by environment variables:
 | `FORGEJO_TOKEN_READ_ONLY` | **yes** | — | Read token (or `FORGEJO_TOKEN`). **Read-only scopes are enough.** |
 | `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Providing it enables the write tools**; omit it for a pure read-only server. |
 | `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
+| `FORGEJO_MIRROR_TOKEN` | no | — | Credential `add_push_mirror` sends as the remote's password (e.g. a GitHub PAT). Kept out of the conversation — never passed as a tool argument. Omit if you only use `use_ssh=true` mirrors. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 
 Mint a token at **Codeberg → Settings → Applications** (or your instance's equivalent). For
 the read tools, read scopes (`read:repository`, `read:issue`, `read:user`) suffice. The write
-token needs `write:repository` (including delete).
+token needs `write:repository` (including delete, and the repo-admin push-mirror endpoints).
 
 A **read token is mandatory**: the server refuses to start on a write token alone, and the
 read token must be a *different* token from `FORGEJO_TOKEN_WRITE` — you can't shortcut by
@@ -102,6 +104,10 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |
 | `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |
 | `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
+| `add_push_mirror` | **write** | Auto-push a repo to an external remote (e.g. a GitHub mirror); credential from `FORGEJO_MIRROR_TOKEN` or `use_ssh=true` |
+| `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
+| `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
+| `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole

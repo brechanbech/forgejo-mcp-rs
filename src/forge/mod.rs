@@ -422,4 +422,56 @@ impl Forge {
     pub async fn delete_repo(&self, owner: &str, repo: &str) -> Result<(), ForgeError> {
         self.delete(&format!("repos/{owner}/{repo}")).await
     }
+
+    // --- push mirrors (repo-admin; auto-push this repo to an external remote) ---
+
+    /// `POST /repos/{owner}/{repo}/push_mirrors` — add a push mirror. The body is a
+    /// `CreatePushMirrorOption`; the response `PushMirror` never echoes the password.
+    pub async fn add_push_mirror(
+        &self,
+        owner: &str,
+        repo: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.post(&format!("repos/{owner}/{repo}/push_mirrors"), body)
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/push_mirrors` — list configured push mirrors (paged).
+    pub async fn list_push_mirrors(
+        &self,
+        owner: &str,
+        repo: &str,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.get_list(
+            &format!("repos/{owner}/{repo}/push_mirrors"),
+            &paging(page, limit),
+        )
+        .await
+    }
+
+    /// `DELETE /repos/{owner}/{repo}/push_mirrors/{name}` — remove a push mirror by remote name.
+    pub async fn delete_push_mirror(
+        &self,
+        owner: &str,
+        repo: &str,
+        remote_name: &str,
+    ) -> Result<(), ForgeError> {
+        self.delete(&format!("repos/{owner}/{repo}/push_mirrors/{remote_name}"))
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/push_mirrors-sync` — trigger an immediate sync of all mirrors.
+    pub async fn sync_push_mirrors(&self, owner: &str, repo: &str) -> Result<(), ForgeError> {
+        self.request(
+            Method::POST,
+            &format!("repos/{owner}/{repo}/push_mirrors-sync"),
+            &[],
+            None,
+        )
+        .await?;
+        Ok(())
+    }
 }
