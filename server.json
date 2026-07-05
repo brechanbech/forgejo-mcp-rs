@@ -3,7 +3,7 @@
   "name": "io.github.brechanbech/forgejo-mcp-rs",
   "title": "Forgejo / Codeberg",
   "description": "Model Context Protocol server for Forgejo / Codeberg, in Rust",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "websiteUrl": "https://codeberg.org/brechanbech/forgejo-mcp-rs",
   "repository": {
     "url": "https://github.com/brechanbech/forgejo-mcp-rs",
@@ -13,7 +13,7 @@
     {
       "registryType": "cargo",
       "identifier": "forgejo-mcp-rs",
-      "version": "0.10.1",
+      "version": "0.11.0",
       "transport": {
         "type": "stdio"
       }
