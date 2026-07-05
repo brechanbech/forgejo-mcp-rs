@@ -3,7 +3,7 @@
 [![CI](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions)
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for
-[Forgejo](https://forgejo.org/) and [Codeberg](https://codeberg.org), written in Rust. It lets
+[Forgejo](https://forgejo.org/) and [Codeberg](https://codeberg.org). It lets
 an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
 repositories, issues, and pull requests — over the Forgejo REST API.
 
