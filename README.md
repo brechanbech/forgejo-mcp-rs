@@ -45,6 +45,12 @@ A **read token is mandatory**: the server refuses to start on a write token alon
 read token must be a *different* token from `FORGEJO_TOKEN_WRITE` — you can't shortcut by
 reusing the write token for reads.
 
+> **Forgejo 15+ token scoping.** Forgejo 15.0 tightened authorization on many repository
+> APIs to match its fine-grained, repository-scoped access tokens. Classic broad tokens are
+> unaffected, but if you mint a *repository-scoped* token it must actually carry the scopes
+> above — in particular the repo-admin scope for the push-mirror tools, which otherwise return
+> `403`. Scope the token to every repo you intend to reach.
+
 ### Write mode
 
 The server is **read-only by default.** `create_repo` / `delete_repo` work only when (a)
