@@ -150,6 +150,23 @@ Require `FORGEJO_TOKEN_WRITE` + active write mode (see the security model).
 fields and Codeberg renames are unreliable; not yet needed. `comment_on_issue` and other
 issue/PR writes are also future work.
 
+(The per-version tables above cover the original v0.1/v0.2 surface; the intervening tools —
+`create_branch`, `create_pull_request`, `list_pull_request_reviews`, and the push-mirror set —
+landed across v0.3–v0.11 and are listed in the README's current tool table rather than here.)
+
+### v0.12 — Forgejo Actions (CI)
+
+| Tool | Status | Purpose |
+|---|---|---|
+| `list_workflow_runs` | **done** | Runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. A run's outcome is its `status` (no separate `conclusion`). |
+| `get_workflow_run` | **done** | One run by internal `id` (not `index_in_repo`, despite the web URL). |
+| `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run, keyed by workflow file name (no list-workflows API — discover via `get_file_contents`). |
+
+`list_workflow_runs` unwraps the endpoint's `{ workflow_runs, total_count }` body (no
+`X-Total-Count` header), so it does not auto-paginate. A `404` from these endpoints means the
+repo has the Actions unit disabled, not that there are no runs. Verified end-to-end against a
+live dispatched run on Codeberg's Forgejo 15.
+
 ## Error handling
 
 `ForgeError`s map to MCP errors in `tools::to_mcp`, keyed off `ForgeError::is_caller_error`:
@@ -171,23 +188,29 @@ a real client) so slow responses can return.
 
 ## Non-goals
 
-- Not a full Forgejo SDK — the in-house `forge` client covers only the ~14 endpoints the
+- Not a full Forgejo SDK — the in-house `forge` client covers only the ~17 endpoints the
   assistant needs, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
 - No webhooks, admin, or CI-control tooling in v0.1.
 
-### Tried and dropped: CI status
+### CI status: dropped via commit-status, later solved via the Actions-runs API (v0.12.0)
 
-A `ci_status` ("did my CI pass?") tool was attempted and removed — **Codeberg's API can't
-deliver it usefully today**. The combined commit-status endpoint
-(`repo_get_combined_status_by_ref`) returns an empty `state: ""` / `total_count: 0` for
-Forgejo-Actions repos (Actions don't populate commit statuses), and the Actions-runs
-endpoints (`/actions/runs`, `/actions/tasks`) 404 on Codeberg's Forgejo version. So there is
-no API that reports a Forgejo-Actions run's pass/fail. Revisit if/when Codeberg exposes the
-Actions-runs API. (Aside: that empty `state: ""` is exactly the sort of value a strict typed
-client rejects; our loose parsing wouldn't choke on it, but there's still no useful status to
-return.)
+An early `ci_status` ("did my CI pass?") tool built on the combined commit-status endpoint
+(`repo_get_combined_status_by_ref`) was removed: that endpoint returns an empty `state: ""` /
+`total_count: 0` for Forgejo-Actions repos, because Actions don't populate commit statuses.
+(Aside: that empty `state: ""` is exactly the sort of value a strict typed client rejects; our
+loose parsing wouldn't choke on it, but there was still no useful status to return.)
+
+The earlier belief that the Actions-runs endpoints themselves 404 on Codeberg was **wrong** —
+they 404 only when a repo has the Actions unit *disabled*, not because Forgejo lacks them.
+Codeberg's Forgejo 15 exposes `/actions/runs`, `/actions/runs/{id}`, and
+`/actions/workflows/{file}/dispatches`, verified live against the real API. So as of **v0.12.0**
+the server has proper CI tooling: `list_workflow_runs` (a run's pass/fail is its `status` field —
+there is no separate `conclusion`) and `get_workflow_run` (read), plus `dispatch_workflow`
+(write-mode, keyed by workflow file name since there is no list-workflows API). Residual gap:
+Forgejo exposes no repo-level **logs or artifacts** endpoint, so the tools can report *that* a
+run failed and link to it, but can't retrieve the log text programmatically.
 
 ### Why the in-house client (dropping `forgejo-api`)
 

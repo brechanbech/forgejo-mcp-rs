@@ -474,4 +474,52 @@ impl Forge {
         .await?;
         Ok(())
     }
+
+    // --- actions (CI) ---
+
+    /// `GET /repos/{owner}/{repo}/actions/runs` — workflow runs. Returns the raw
+    /// `{ workflow_runs, total_count }` wrapper (confirmed live: no `X-Total-Count` header),
+    /// so the tool layer unwraps it like search rather than auto-paginating. `filters` carries
+    /// any of `head_sha`/`ref`/`status`/`event`/`workflow_id` already stringified; paging is
+    /// merged in.
+    pub async fn list_workflow_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        page: Option<u32>,
+        limit: Option<u32>,
+        filters: &[(&'static str, String)],
+    ) -> Result<Value, ForgeError> {
+        let mut query = paging(page, limit);
+        query.extend(filters.iter().cloned());
+        self.get(&format!("repos/{owner}/{repo}/actions/runs"), &query)
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/actions/runs/{run_id}` — one workflow run.
+    pub async fn get_workflow_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<Value, ForgeError> {
+        self.get(&format!("repos/{owner}/{repo}/actions/runs/{run_id}"), &[])
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/actions/workflows/{filename}/dispatches` — trigger a
+    /// `workflow_dispatch` run. The body is a `DispatchWorkflowOption` (`ref` required).
+    pub async fn dispatch_workflow(
+        &self,
+        owner: &str,
+        repo: &str,
+        filename: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.post(
+            &format!("repos/{owner}/{repo}/actions/workflows/{filename}/dispatches"),
+            body,
+        )
+        .await
+    }
 }

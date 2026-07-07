@@ -225,6 +225,17 @@ pub struct RepoRef {
     pub repo: String,
 }
 
+/// A workflow run addressed by its numeric run id within a repository.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RunRef {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Workflow run id (the `id` field from `list_workflow_runs`).
+    pub run_id: i64,
+}
+
 /// Parameters for listing branches in a repository.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct ListBranchesParams {
@@ -1216,6 +1227,173 @@ pub async fn sync_push_mirrors(forge: &Forge, params: RepoRef) -> Result<CallToo
     }))
 }
 
+// --- actions (CI) ---
+
+/// Parameters for the `list_workflow_runs` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListWorkflowRunsParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Filter by head commit SHA — the most reliable way to find the run for a given push.
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    /// Filter by branch or tag ref, e.g. `refs/heads/main`.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    /// Filter by run status, e.g. `success`, `failure`, `running`, `waiting`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Filter by triggering event, e.g. `push`, `pull_request`, `workflow_dispatch`.
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Filter by workflow file name, e.g. `ci.yml`.
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// A slimmed workflow run — the fields worth surfacing from a verbose `ActionRun`. All-optional
+/// so a well-formed run never fails to deserialize. Note there is no `conclusion` field: the
+/// terminal outcome (success/failure/…) lives in `status`.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct RunSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_in_repo: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prettyref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped: Option<String>,
+}
+
+/// Projects raw workflow-run objects down to [`RunSummary`], skipping any that don't fit.
+fn slim_runs(items: Vec<Value>) -> Vec<RunSummary> {
+    items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect()
+}
+
+/// Lists workflow runs in `owner/repo`, optionally filtered.
+///
+/// The endpoint returns a `{ workflow_runs, total_count }` wrapper with no `X-Total-Count`
+/// header (confirmed against the live API), so this unwraps the body like `search_repos`
+/// rather than auto-paginating via `gather_all`. A `404` from Forgejo here usually means the
+/// repository has Actions disabled, not that there are no runs.
+pub async fn list_workflow_runs(
+    forge: &Forge,
+    params: ListWorkflowRunsParams,
+) -> Result<CallToolResult, McpError> {
+    let mut filters: Vec<(&'static str, String)> = Vec::new();
+    for (key, value) in [
+        ("head_sha", &params.head_sha),
+        ("ref", &params.git_ref),
+        ("status", &params.status),
+        ("event", &params.event),
+        ("workflow_id", &params.workflow_id),
+    ] {
+        if let Some(value) = value {
+            filters.push((key, value.clone()));
+        }
+    }
+    let body = forge
+        .list_workflow_runs(
+            &params.owner,
+            &params.repo,
+            params.page,
+            params.limit,
+            &filters,
+        )
+        .await
+        .map_err(to_mcp)?;
+    let (items, total) = match body {
+        Value::Object(mut map) => (
+            into_items(map.remove("workflow_runs").unwrap_or(Value::Null)),
+            map.get("total_count")
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok()),
+        ),
+        _ => (Vec::new(), None),
+    };
+    paged_result(params.page, params.limit, total, &slim_runs(items))
+}
+
+/// Gets one workflow run by id (full object, not slimmed).
+pub async fn get_workflow_run(forge: &Forge, params: RunRef) -> Result<CallToolResult, McpError> {
+    let run = forge
+        .get_workflow_run(&params.owner, &params.repo, params.run_id)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&run)
+}
+
+/// Parameters for the `dispatch_workflow` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct DispatchWorkflowParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Workflow file name as it appears in `.forgejo/workflows/` or `.github/workflows/`,
+    /// e.g. `ci.yml`. There is no list-workflows API — read the directory with
+    /// `get_file_contents` if you don't know it. The workflow must declare an
+    /// `on: workflow_dispatch` trigger.
+    pub workflow: String,
+    /// Git ref to run on — a branch or tag, e.g. `main`.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// Optional `workflow_dispatch` inputs (key/value), matching the workflow's `inputs:`.
+    #[serde(default)]
+    pub inputs: Option<serde_json::Map<String, Value>>,
+}
+
+/// Triggers a `workflow_dispatch` run and returns the created run (`return_run_info`).
+pub async fn dispatch_workflow(
+    forge: &Forge,
+    params: DispatchWorkflowParams,
+) -> Result<CallToolResult, McpError> {
+    let mut body = serde_json::Map::new();
+    body.insert("ref".to_owned(), Value::String(params.git_ref));
+    body.insert("return_run_info".to_owned(), Value::Bool(true));
+    if let Some(inputs) = params.inputs {
+        body.insert("inputs".to_owned(), Value::Object(inputs));
+    }
+    let run = forge
+        .dispatch_workflow(
+            &params.owner,
+            &params.repo,
+            &params.workflow,
+            &Value::Object(body),
+        )
+        .await
+        .map_err(to_mcp)?;
+    json_result(&run)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1314,5 +1492,39 @@ mod tests {
         assert!(v.get("permissions").is_none());
         // Absent optional fields are omitted, not serialized as null.
         assert!(v.get("private").is_none());
+    }
+
+    #[test]
+    fn slim_runs_keeps_summary_fields_and_drops_the_rest() {
+        let raw = vec![serde_json::json!({
+            "id": 42,
+            "index_in_repo": 7,
+            "title": "CI",
+            "status": "success",
+            "event": "push",
+            "workflow_id": "ci.yml",
+            "commit_sha": "deadbeef",
+            "prettyref": "main",
+            "html_url": "https://codeberg.org/o/r/actions/runs/7",
+            "created": "2026-07-06T00:00:00Z",
+            "started": "2026-07-06T00:00:01Z",
+            "stopped": "2026-07-06T00:01:00Z",
+            // Verbose/nested fields that must NOT survive the slim:
+            "repository": { "full_name": "o/r", "private": true },
+            "trigger_user": { "login": "brechanbech", "email": "person@example.com" },
+            "event_payload": "{...large json...}"
+        })];
+        let slim = slim_runs(raw);
+        assert_eq!(slim.len(), 1);
+
+        let v = serde_json::to_value(&slim[0]).unwrap();
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["status"], "success");
+        assert_eq!(v["workflow_id"], "ci.yml");
+        assert_eq!(v["prettyref"], "main");
+        // Nested/verbose fields (and the trigger user's email) are dropped.
+        assert!(v.get("repository").is_none());
+        assert!(v.get("trigger_user").is_none());
+        assert!(v.get("event_payload").is_none());
     }
 }

@@ -8,11 +8,11 @@ an MCP client (Claude Code, Claude Desktop, …) read your forge — the authent
 repositories, issues, and pull requests — over the Forgejo REST API.
 
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
-> the forge — user, repos, issues, pull requests, search, orgs, notifications, comments, and
-> reviews — plus guarded writes (`create_repo`, `create_branch`, `create_issue`,
-> `create_pull_request`, `comment_on_issue`, `delete_repo`, and push-mirror management) gated
-> behind a separate write token and a deliberate, time-boxed **write
-> mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
+> the forge — user, repos, issues, pull requests, search, orgs, notifications, comments,
+> reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `create_branch`,
+> `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`, push-mirror
+> management, and `dispatch_workflow`) gated behind a separate write token and a deliberate,
+> time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
 It speaks the Forgejo REST API directly through a small, in-house client (`src/forge/`) — an
 **independent implementation over the documented API**, not a port of any other server. There
@@ -102,6 +102,8 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_notifications` | read | Your notification threads, slimmed (`all=true` for read+unread) |
 | `list_issue_comments` | read | Comments on an issue/PR (slimmed) |
 | `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
+| `list_workflow_runs` | read | Forgejo Actions (CI) runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` (no separate conclusion) |
+| `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
 | `create_repo` | **write** | Create a repo (defaults to private) |
@@ -114,6 +116,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
 | `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
 | `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
+| `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole
