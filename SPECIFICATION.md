@@ -91,9 +91,9 @@ discipline, different names:
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `WOODPECKER_URL` | **yes** | — | Instance base URL (self-hosted; there is no default). |
+| `WOODPECKER_URL` | **yes** | — | Instance base URL — e.g. `https://ci.codeberg.org` (Codeberg's hosted Woodpecker) or a self-hosted one. No default. |
 | `WOODPECKER_TOKEN_READ_ONLY` | **yes** | — | Personal access token. `WOODPECKER_TOKEN` is accepted as a fallback. |
-| `WOODPECKER_TOKEN_WRITE` | no | — | Push-scoped token; its presence enables the pipeline write tools. |
+| `WOODPECKER_TOKEN_WRITE` | no | — | A second, *different* token; its presence enables the pipeline write tools (see the token-model caveat in v0.13). |
 | `WOODPECKER_WRITE_MINUTES` | no | `10` | Default write-mode window, clamped to `1..=60`. |
 
 ## Security model
@@ -229,6 +229,16 @@ auto-paginator ends on a short page). The write tools reuse the shared `Elevatio
 Endpoint shapes were taken from Woodpecker's `server/router/api.go`, not assumed. The list tools
 currently pass pipeline/repo JSON straight through (no slimming yet). There is no Woodpecker
 `version`/instance tool yet.
+
+**Token-model caveat.** Woodpecker issues **one PAT per user** and does not scope it read-only vs
+write — a user's rights come from their forge repo access (pull/push). That does not fit this
+server's rule that the read and write tokens must differ: a single token yields a read-only server,
+and enabling the write tools needs a *distinct* `WOODPECKER_TOKEN_WRITE`, i.e. a second (bot)
+account. The wart is inherited from reusing Forgejo's fine-grained-token model; relaxing the
+must-differ rule for Woodpecker (letting one token back both read and write) is a candidate
+refinement. Note also that Codeberg **hosts** a public Woodpecker at `ci.codeberg.org` (its
+recommended CI), so for Codeberg repos `WOODPECKER_URL` is `https://ci.codeberg.org`, not a
+self-hosted instance.
 
 ## Error handling
 

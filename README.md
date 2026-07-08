@@ -159,15 +159,26 @@ cancels, and restarts them — a separate process with its own token and tool na
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `WOODPECKER_URL` | **yes** | — | Instance base URL (self-hosted; there is no default). |
+| `WOODPECKER_URL` | **yes** | — | Instance base URL, e.g. `https://ci.codeberg.org` (Codeberg's hosted Woodpecker) or your own. No default. |
 | `WOODPECKER_TOKEN_READ_ONLY` | **yes** | — | Personal access token (or `WOODPECKER_TOKEN`). |
-| `WOODPECKER_TOKEN_WRITE` | no | — | Push-scoped token. **Providing it enables the pipeline write tools.** |
+| `WOODPECKER_TOKEN_WRITE` | no | — | A **second, different** token that enables the pipeline write tools — see the note below. |
 | `WOODPECKER_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
 
-Mint a personal access token from your Woodpecker profile (the user menu, top right). The same
-read/write discipline as the Forgejo server applies: a read token is mandatory and must differ from
-`WOODPECKER_TOKEN_WRITE`, and write mode works identically — `enable_write_mode` elevates for a
-sliding, capped window and `write_status` reports it.
+Mint a personal access token from your Woodpecker profile (user icon, top right). If your repos are
+on Codeberg, its hosted Woodpecker is at `https://ci.codeberg.org` — log in with your Codeberg
+account and copy the token from your profile page.
+
+**Read vs write — a Woodpecker limitation.** Woodpecker issues **one token per user** and does *not*
+scope it read-only vs write (your rights come from your forge repo access — pull vs push). But the
+write tools here require `WOODPECKER_TOKEN_WRITE` to be a **different** token from the read one. So:
+
+- **Read-only (recommended):** set `WOODPECKER_TOKEN_READ_ONLY` only, leave `WOODPECKER_TOKEN_WRITE`
+  unset — the write tools stay disabled.
+- **To enable trigger/cancel/restart:** you need a second, distinct token, which in practice means a
+  **second Woodpecker/forge account** (a bot with push access), since one account yields only one
+  token.
+
+Write mode itself works exactly like the Forgejo server (`enable_write_mode` / `write_status`).
 
 Woodpecker addresses repositories by a **numeric `repo_id`**, not `owner/name`. Use `lookup_repo`
 (or read the `id` from `list_repos`) to resolve a name to its id, then pass that id to the other
