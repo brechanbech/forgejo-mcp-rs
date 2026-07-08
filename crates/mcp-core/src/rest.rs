@@ -213,14 +213,27 @@ impl RestClient {
             .unwrap_or(Value::Null))
     }
 
-    /// `POST` with no body, discarding any (typically empty) response — for trigger/sync-style
-    /// endpoints.
+    /// `POST` with no body, discarding any (typically empty) response — for sync-style endpoints.
     ///
     /// # Errors
     /// Propagates transport and non-2xx ([`ApiError::Status`]) failures.
     pub async fn post_empty(&self, path: &str) -> Result<(), ApiError> {
         self.request(Method::POST, path, &[], None).await?;
         Ok(())
+    }
+
+    /// `POST` with no request body, returning the response resource — for action endpoints that
+    /// take no input but report the object they created (e.g. restarting a pipeline). Empty
+    /// bodies become `Null`.
+    ///
+    /// # Errors
+    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures.
+    pub async fn post_none(&self, path: &str) -> Result<Value, ApiError> {
+        Ok(self
+            .request(Method::POST, path, &[], None)
+            .await?
+            .0
+            .unwrap_or(Value::Null))
     }
 
     /// `DELETE`, discarding any (typically empty) body.
