@@ -10,13 +10,12 @@ mod tools;
 
 use anyhow::Context as _;
 use rmcp::{ServiceExt as _, transport::stdio};
-use tracing_subscriber::EnvFilter;
 
 use crate::server::ForgejoMcp;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    mcp_core::init_tracing("forgejo_mcp_rs=info");
 
     tracing::info!(target: "forgejo_mcp.startup", version = env!("CARGO_PKG_VERSION"));
 
@@ -31,14 +30,4 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("MCP service ended with error")?;
     Ok(())
-}
-
-/// Configures `tracing` to write structured logs to stderr, honoring `RUST_LOG`.
-fn init_tracing() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("forgejo_mcp_rs=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
 }

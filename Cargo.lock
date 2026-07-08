@@ -186,14 +186,13 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "base64",
- "reqwest",
+ "mcp-core",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
  "zeroize",
 ]
@@ -613,6 +612,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "mcp-core"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1671,6 +1685,14 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "woodpecker-mcp"
+version = "0.1.0"
+dependencies = [
+ "mcp-core",
+ "tracing",
+]
 
 [[package]]
 name = "writeable"

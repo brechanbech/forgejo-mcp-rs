@@ -1,23 +1,44 @@
-[package]
-name = "forgejo-mcp-rs"
-description = "Model Context Protocol server for Forgejo / Codeberg, in Rust."
-version = "0.12.0"
+[workspace]
+resolver = "3"
+members = ["crates/mcp-core", "crates/forgejo-mcp", "crates/woodpecker-mcp"]
+
+# Shared package metadata. Each crate keeps its own name/version/description but inherits the
+# rest with `edition.workspace = true`, etc. (forgejo-mcp-rs stays at its own 0.12.x line;
+# woodpecker-mcp versions independently.)
+[workspace.package]
 edition = "2024"
 # 1.88: required by `time` >= 0.3.47, the first release fixing RUSTSEC-2026-0009.
 rust-version = "1.88"
 license = "MIT"
-repository = "https://codeberg.org/brechanbech/forgejo-mcp-rs"
 authors = ["Stefan Ractliffe"]
-readme = "README.md"
-keywords = ["mcp", "forgejo", "codeberg", "git", "ai"]
-categories = ["development-tools", "api-bindings"]
+repository = "https://codeberg.org/brechanbech/forgejo-mcp-rs"
 
-[[bin]]
-name = "forgejo-mcp-rs"
-path = "src/main.rs"
+# One source of truth for dependency versions across the workspace, so the two servers and the
+# shared core can never drift onto different majors.
+[workspace.dependencies]
+mcp-core = { path = "crates/mcp-core" }
+# --- MCP ---
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+# --- REST over reqwest ---
+# rustls (bundled webpki roots) instead of native-tls: pure-Rust TLS, no Apple/OpenSSL system
+# dependency (portable to FreeBSD). Private-CA instances would need `rustls-tls-native-roots`.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+zeroize = "1"
+# --- async runtime ---
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
+# --- (de)serialization & schema ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+base64 = "0.22"
+# --- errors / logging ---
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-[lints.rust]
-# This server reaches Forgejo over HTTPS — there is no reason to write `unsafe`, so forbid
+[workspace.lints.rust]
+# These servers reach their hosts over HTTPS — there is no reason to write `unsafe`, so forbid
 # it outright (stronger than `deny`: an inner `allow` can't undo it).
 unsafe_code = "forbid"
 ambiguous_negative_literals = "warn"
@@ -28,36 +49,9 @@ trivial_numeric_casts = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 unused_lifetimes = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-
-[dependencies]
-# --- MCP ---
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
-
-# --- Forgejo / Codeberg REST (in-house thin client over reqwest) ---
-# rustls (bundled webpki roots) instead of the default native-tls: pure-Rust TLS, no Apple/
-# OpenSSL system dependency (portable to FreeBSD), and it drops the native-tls stack that pulled
-# two core-foundation majors. Private-CA instances would need `rustls-tls-native-roots` instead.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-url = "2"
-zeroize = "1"
-
-# --- async runtime ---
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
-
-# --- (de)serialization & schema ---
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = "1"
-# Decoding the base64 file bodies the `contents` endpoint returns (already in the tree via reqwest).
-base64 = "0.22"
-
-# --- errors / logging ---
-anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [profile.release]
 debug = "line-tables-only"

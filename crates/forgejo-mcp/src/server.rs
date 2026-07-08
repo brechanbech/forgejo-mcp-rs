@@ -4,10 +4,10 @@
 //! method is a thin wrapper that delegates to a function in [`crate::tools`], keeping this
 //! file a readable index of the server's surface.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use anyhow::Context as _;
+use mcp_core::{Elevation, json_result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
@@ -27,19 +27,16 @@ const MAX_WRITE_MINUTES: u64 = 60;
 
 /// The Forgejo / Codeberg MCP server.
 ///
-/// Clone is cheap (clients sit behind `Arc`s, the elevation state behind a shared `Mutex`),
-/// as rmcp may clone the handler — so all clones see the same write-mode state.
+/// Clone is cheap (clients sit behind `Arc`s, the elevation state behind a shared `Mutex` inside
+/// the `Arc<Elevation>`), as rmcp may clone the handler — so all clones see the same write-mode
+/// state.
 #[derive(Clone)]
 pub struct ForgejoMcp {
     tool_router: ToolRouter<Self>,
     /// Read-only client (always present).
     forgejo: Arc<Forge>,
-    /// Write client — present only if `FORGEJO_TOKEN_WRITE` was configured.
-    write: Option<Arc<Forge>>,
-    /// Active write-mode window as `(expires_at, window_length)`; `None` = read mode.
-    write_state: Arc<Mutex<Option<(Instant, Duration)>>>,
-    /// Default window length used by `enable_write_mode` when no `minutes` is given.
-    default_window: Duration,
+    /// Write client plus the time-boxed write-mode gate (shared across handler clones).
+    elevation: Arc<Elevation<Forge>>,
     /// Optional credential for push-mirror targets (e.g. a GitHub PAT), from
     /// `FORGEJO_MIRROR_TOKEN`. Behind `Arc` so handler clones share one copy; zeroized on drop.
     /// Sent only as the `remote_password` when adding a push mirror — never returned or logged.
@@ -83,11 +80,12 @@ impl ForgejoMcp {
             None => None,
         };
 
+        // `Elevation::new` clamps the default window to `1..=MAX_WRITE_MINUTES`.
         let minutes = std::env::var("FORGEJO_WRITE_MINUTES")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_WRITE_MINUTES)
-            .clamp(1, MAX_WRITE_MINUTES);
+            .unwrap_or(DEFAULT_WRITE_MINUTES);
+        let elevation = Elevation::new(write, minutes, MAX_WRITE_MINUTES, "FORGEJO_TOKEN_WRITE");
 
         // Optional push-mirror credential — independent of the read/write API tokens, used only
         // as the remote password when adding a push mirror. Empty counts as unset.
@@ -99,9 +97,7 @@ impl ForgejoMcp {
         Ok(Self {
             tool_router: Self::tool_router(),
             forgejo: Arc::new(forgejo),
-            write,
-            write_state: Arc::new(Mutex::new(None)),
-            default_window: Duration::from_secs(minutes * 60),
+            elevation: Arc::new(elevation),
             mirror_token,
         })
     }
@@ -111,57 +107,24 @@ impl ForgejoMcp {
         self.mirror_token.as_ref().map(|t| t.as_str())
     }
 
-    /// The write client, but only while write mode is active; otherwise a clear error
-    /// explaining how to proceed (no write token, or not elevated).
+    /// The write client, gated on active write mode (delegates to [`Elevation::client`]).
     fn write_client(&self) -> Result<&Forge, McpError> {
-        let Some(client) = self.write.as_deref() else {
-            return Err(McpError::invalid_params(
-                "read-only: no FORGEJO_TOKEN_WRITE is configured for this server".to_owned(),
-                None,
-            ));
-        };
-        let active = self
-            .write_state
-            .lock()
-            .unwrap()
-            .is_some_and(|(until, _)| Instant::now() < until);
-        if !active {
-            return Err(McpError::invalid_params(
-                "write mode is not active — call enable_write_mode first (and tell the user)"
-                    .to_owned(),
-                None,
-            ));
-        }
-        Ok(client)
+        self.elevation.client()
     }
 
     /// Slides the auto-revert window forward after a successful write.
     fn extend_window(&self) {
-        let mut state = self.write_state.lock().unwrap();
-        if let Some((_, window)) = *state {
-            *state = Some((Instant::now() + window, window));
-        }
+        self.elevation.extend();
     }
 
     /// Minutes left in the current write-mode window (0 if inactive).
     fn minutes_remaining(&self) -> u64 {
-        match *self.write_state.lock().unwrap() {
-            Some((until, _)) => until
-                .saturating_duration_since(Instant::now())
-                .as_secs()
-                .div_ceil(60),
-            None => 0,
-        }
+        self.elevation.minutes_remaining()
     }
 
     /// A short note about the current window, appended to write results.
     fn window_note(&self) -> String {
-        let left = self.minutes_remaining();
-        if left == 0 {
-            "write mode inactive".to_owned()
-        } else {
-            format!("write mode active — about {left} min remaining (auto-reverts)")
-        }
+        self.elevation.window_note()
     }
 }
 
@@ -366,12 +329,12 @@ impl ForgejoMcp {
     )]
     async fn write_status(&self) -> Result<CallToolResult, McpError> {
         let remaining = self.minutes_remaining();
-        tools::json_result(&serde_json::json!({
-            "write_token_configured": self.write.is_some(),
+        json_result(&serde_json::json!({
+            "write_token_configured": self.elevation.is_configured(),
             "write_mode_active": remaining > 0,
             "minutes_remaining": remaining,
-            "default_window_minutes": self.default_window.as_secs() / 60,
-            "max_window_minutes": MAX_WRITE_MINUTES,
+            "default_window_minutes": self.elevation.default_minutes(),
+            "max_window_minutes": self.elevation.max_minutes(),
         }))
     }
 
@@ -383,19 +346,11 @@ impl ForgejoMcp {
         &self,
         Parameters(params): Parameters<tools::EnableWriteParams>,
     ) -> Result<CallToolResult, McpError> {
-        if self.write.is_none() {
-            return Err(McpError::invalid_params(
-                "read-only: no FORGEJO_TOKEN_WRITE is configured for this server".to_owned(),
-                None,
-            ));
+        if !self.elevation.is_configured() {
+            return Err(self.elevation.not_configured_error());
         }
-        let minutes = params
-            .minutes
-            .map_or(self.default_window.as_secs() / 60, u64::from)
-            .clamp(1, MAX_WRITE_MINUTES);
-        let window = Duration::from_secs(minutes * 60);
-        *self.write_state.lock().unwrap() = Some((Instant::now() + window, window));
-        tools::json_result(&serde_json::json!({
+        let minutes = self.elevation.enable(params.minutes);
+        json_result(&serde_json::json!({
             "write_mode_active": true,
             "minutes": minutes,
             "note": format!(
@@ -408,8 +363,8 @@ impl ForgejoMcp {
     /// Leaves write mode immediately.
     #[tool(description = "Leave write mode immediately (back to read-only)")]
     async fn disable_write_mode(&self) -> Result<CallToolResult, McpError> {
-        *self.write_state.lock().unwrap() = None;
-        tools::json_result(&serde_json::json!({ "write_mode_active": false }))
+        self.elevation.disable();
+        json_result(&serde_json::json!({ "write_mode_active": false }))
     }
 
     // --- repo management (require write mode) ---
@@ -618,7 +573,7 @@ impl ServerHandler for ForgejoMcp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Duration, Forge, ForgejoMcp, Instant, Mutex, Url, resolve_tokens};
+    use super::{Arc, Elevation, Forge, ForgejoMcp, MAX_WRITE_MINUTES, Url, resolve_tokens};
 
     #[test]
     fn read_token_is_required() {
@@ -655,7 +610,9 @@ mod tests {
         assert_eq!((r.as_str(), w), ("r", None));
     }
 
-    /// A server with dummy clients (no network is touched by the gating logic under test).
+    /// A server with dummy clients (no network is touched by the logic under test). The
+    /// write-mode gating itself is tested in `mcp_core::Elevation`; here we only cover the
+    /// forge-specific mirror-token plumbing.
     fn server(with_write: bool) -> ForgejoMcp {
         let url = Url::parse("https://codeberg.org").unwrap();
         let read = Arc::new(Forge::new(&url, "ro").unwrap());
@@ -663,50 +620,14 @@ mod tests {
         ForgejoMcp {
             tool_router: ForgejoMcp::tool_router(),
             forgejo: read,
-            write,
-            write_state: Arc::new(Mutex::new(None)),
-            default_window: Duration::from_secs(10 * 60),
+            elevation: Arc::new(Elevation::new(
+                write,
+                10,
+                MAX_WRITE_MINUTES,
+                "FORGEJO_TOKEN_WRITE",
+            )),
             mirror_token: None,
         }
-    }
-
-    /// Sets the elevation window to expire at `until` (with a fixed 10-minute slide length).
-    fn set_until(s: &ForgejoMcp, until: Instant) {
-        *s.write_state.lock().unwrap() = Some((until, Duration::from_secs(600)));
-    }
-
-    fn in_future() -> Instant {
-        Instant::now() + Duration::from_secs(600)
-    }
-
-    fn in_past() -> Instant {
-        Instant::now().checked_sub(Duration::from_secs(1)).unwrap()
-    }
-
-    #[test]
-    fn no_write_token_always_refuses() {
-        let s = server(false);
-        assert!(s.write_client().is_err(), "no token -> refused");
-        set_until(&s, in_future());
-        assert!(
-            s.write_client().is_err(),
-            "no token, even 'elevated' -> still refused"
-        );
-    }
-
-    #[test]
-    fn gating_requires_active_window() {
-        let s = server(true);
-        assert!(s.write_client().is_err(), "not elevated -> refused");
-        assert_eq!(s.minutes_remaining(), 0);
-
-        set_until(&s, in_future());
-        assert!(s.write_client().is_ok(), "elevated -> allowed");
-        assert!(s.minutes_remaining() >= 9);
-
-        set_until(&s, in_past());
-        assert!(s.write_client().is_err(), "expired -> refused");
-        assert_eq!(s.minutes_remaining(), 0);
     }
 
     #[test]
@@ -715,14 +636,5 @@ mod tests {
         assert!(s.mirror_token().is_none(), "unset -> None");
         s.mirror_token = Some(Arc::new(zeroize::Zeroizing::new("ghp_x".to_owned())));
         assert_eq!(s.mirror_token(), Some("ghp_x"));
-    }
-
-    #[test]
-    fn extend_window_re_arms() {
-        let s = server(true);
-        set_until(&s, Instant::now()); // on the edge of expiry
-        s.extend_window(); // slides forward by the stored window
-        assert!(s.write_client().is_ok());
-        assert!(s.minutes_remaining() >= 9);
     }
 }

@@ -1,0 +1,44 @@
+[package]
+name = "forgejo-mcp-rs"
+description = "Model Context Protocol server for Forgejo / Codeberg, in Rust."
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["mcp", "forgejo", "codeberg", "git", "ai"]
+categories = ["development-tools", "api-bindings"]
+
+[[bin]]
+name = "forgejo-mcp-rs"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Shared REST client, write-mode elevation, pagination & result helpers.
+mcp-core = { workspace = true }
+
+# --- MCP ---
+rmcp = { workspace = true }
+
+# --- token handling (mirror credential held zeroized) & URL parsing ---
+url = { workspace = true }
+zeroize = { workspace = true }
+
+# --- async runtime ---
+tokio = { workspace = true }
+
+# --- (de)serialization & schema ---
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+# Decoding the base64 file bodies the `contents` endpoint returns.
+base64 = { workspace = true }
+
+# --- errors / logging ---
+anyhow = { workspace = true }
+tracing = { workspace = true }
