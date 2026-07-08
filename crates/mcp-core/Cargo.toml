@@ -1,5 +1,8 @@
 [package]
-name = "mcp-core"
+# Published as `forgejo-mcp-core` (the bare `mcp-core` name is taken on crates.io by an unrelated
+# crate). Consumers keep the dependency key `mcp-core` via `package = "forgejo-mcp-core"`, so the
+# import path stays `mcp_core` and no source changes are needed.
+name = "forgejo-mcp-core"
 description = "Shared MCP-server scaffolding: a thin REST client, time-boxed write-mode elevation, pagination, and result helpers."
 version = "0.1.0"
 edition.workspace = true

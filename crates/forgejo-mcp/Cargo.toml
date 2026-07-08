@@ -1,13 +1,13 @@
 [package]
 name = "forgejo-mcp-rs"
 description = "Model Context Protocol server for Forgejo / Codeberg, in Rust."
-version = "0.12.0"
+version = "0.13.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["mcp", "forgejo", "codeberg", "git", "ai"]
 categories = ["development-tools", "api-bindings"]
 

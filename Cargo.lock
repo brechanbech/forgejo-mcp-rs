@@ -181,12 +181,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "forgejo-mcp-core"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "forgejo-mcp-rs"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64",
- "mcp-core",
+ "forgejo-mcp-core",
  "rmcp",
  "schemars",
  "serde",
@@ -612,21 +627,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
-]
-
-[[package]]
-name = "mcp-core"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "zeroize",
 ]
 
 [[package]]
@@ -1691,7 +1691,7 @@ name = "woodpecker-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "mcp-core",
+ "forgejo-mcp-core",
  "rmcp",
  "schemars",
  "serde",
