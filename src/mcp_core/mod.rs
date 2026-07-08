@@ -14,14 +14,15 @@
 
 mod elevation;
 mod error;
-mod helpers;
+// `pub(crate)` so `gather_all`'s return type `Gathered` is reachable for field access at the call
+// sites (they use it by value, not by name, so it isn't re-exported below).
+pub(crate) mod helpers;
 mod rest;
 
 pub use elevation::Elevation;
 pub use error::ApiError;
 pub use helpers::{
-    Gathered, PageFetch, decode, gather_all, gathered_result, into_items, json_result,
-    paged_result, to_mcp,
+    decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
 };
 pub use rest::{Auth, RestClient, RestConfig, paging};
 

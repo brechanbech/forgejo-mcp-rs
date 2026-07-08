@@ -181,33 +181,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "forgejo-mcp-core"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "zeroize",
-]
-
-[[package]]
 name = "forgejo-mcp-rs"
 version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64",
- "forgejo-mcp-core",
+ "reqwest",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "zeroize",
 ]
@@ -1685,21 +1671,6 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "woodpecker-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "forgejo-mcp-core",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "url",
-]
 
 [[package]]
 name = "writeable"

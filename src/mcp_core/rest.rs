@@ -16,10 +16,10 @@ use serde_json::Value;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::error::ApiError;
+use super::error::ApiError;
 
 /// Header some list endpoints set with the full (unpaginated) item count. Absent on servers
-/// that don't report it (e.g. Woodpecker) — [`crate::gather_all`] then detects the end by a
+/// that don't report it (e.g. Woodpecker) — [`super::gather_all`] then detects the end by a
 /// short final page instead.
 const TOTAL_COUNT: &str = "x-total-count";
 

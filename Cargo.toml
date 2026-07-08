@@ -1,46 +1,33 @@
-[workspace]
-resolver = "3"
-members = ["crates/mcp-core", "crates/forgejo-mcp", "crates/woodpecker-mcp"]
-
-# Shared package metadata. Each crate keeps its own name/version/description but inherits the
-# rest with `edition.workspace = true`, etc. (forgejo-mcp-rs stays at its own 0.12.x line;
-# woodpecker-mcp versions independently.)
-[workspace.package]
+[package]
+name = "forgejo-mcp-rs"
+description = "Model Context Protocol servers for Forgejo / Codeberg and its companion Woodpecker CI, in Rust."
+version = "0.13.0"
 edition = "2024"
 # 1.88: required by `time` >= 0.3.47, the first release fixing RUSTSEC-2026-0009.
 rust-version = "1.88"
 license = "MIT"
-authors = ["Stefan Ractliffe"]
 repository = "https://codeberg.org/brechanbech/forgejo-mcp-rs"
+authors = ["Stefan Ractliffe"]
+readme = "README.md"
+keywords = ["mcp", "forgejo", "woodpecker", "codeberg", "ci"]
+categories = ["development-tools", "api-bindings"]
 
-# One source of truth for dependency versions across the workspace, so the two servers and the
-# shared core can never drift onto different majors.
-[workspace.dependencies]
-# Keyed `mcp-core` (so the import path stays `mcp_core`) but published as `forgejo-mcp-core`.
-# `version` is required for the published manifests (crates.io rejects path-only deps); the
-# `path` is used for local/workspace builds. Bump both together when the core's API changes.
-mcp-core = { path = "crates/mcp-core", version = "0.1.0", package = "forgejo-mcp-core" }
-# --- MCP ---
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
-# --- REST over reqwest ---
-# rustls (bundled webpki roots) instead of native-tls: pure-Rust TLS, no Apple/OpenSSL system
-# dependency (portable to FreeBSD). Private-CA instances would need `rustls-tls-native-roots`.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-url = "2"
-zeroize = "1"
-# --- async runtime ---
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
-# --- (de)serialization & schema ---
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = "1"
-base64 = "0.22"
-# --- errors / logging ---
-anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Shared internal library (the `mcp_core`, `forgejo`, and `woodpecker` modules) plus the two thin
+# server binaries. The forgejo and woodpecker servers are separate processes with separate tokens
+# and tool namespaces; they share the in-house REST/MCP core as modules, not as a published crate.
+[lib]
+name = "forgejo_mcp_rs"
+path = "src/lib.rs"
 
-[workspace.lints.rust]
+[[bin]]
+name = "forgejo-mcp-rs"
+path = "src/bin/forgejo.rs"
+
+[[bin]]
+name = "woodpecker-mcp"
+path = "src/bin/woodpecker.rs"
+
+[lints.rust]
 # These servers reach their hosts over HTTPS — there is no reason to write `unsafe`, so forbid
 # it outright (stronger than `deny`: an inner `allow` can't undo it).
 unsafe_code = "forbid"
@@ -52,9 +39,35 @@ trivial_numeric_casts = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 unused_lifetimes = "warn"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+[dependencies]
+# --- MCP ---
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+
+# --- REST over reqwest ---
+# rustls (bundled webpki roots) instead of the default native-tls: pure-Rust TLS, no Apple/OpenSSL
+# system dependency (portable to FreeBSD). Private-CA instances would need `rustls-tls-native-roots`.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+zeroize = "1"
+
+# --- async runtime ---
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
+
+# --- (de)serialization & schema ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+# Decoding the base64 file bodies the Forgejo `contents` endpoint returns.
+base64 = "0.22"
+
+# --- errors / logging ---
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [profile.release]
 debug = "line-tables-only"

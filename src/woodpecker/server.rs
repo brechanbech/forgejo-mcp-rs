@@ -1,22 +1,22 @@
 //! The MCP server type and its tool definitions.
 //!
 //! [`WoodpeckerMcp`] holds the Woodpecker API client and registers the tools. Each `#[tool]`
-//! method is a thin wrapper that delegates to a function in [`crate::tools`], keeping this file a
+//! method is a thin wrapper that delegates to a function in [`crate::woodpecker::tools`], keeping this file a
 //! readable index of the server's surface. Write tools (trigger/cancel/restart) reuse the shared
-//! [`mcp_core::Elevation`] gate, exactly like the Forgejo server.
+//! [`crate::mcp_core::Elevation`] gate, exactly like the Forgejo server.
 
 use std::sync::Arc;
 
+use crate::mcp_core::{Elevation, json_result};
 use anyhow::Context as _;
-use mcp_core::{Elevation, json_result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use url::Url;
 
-use crate::client::Woodpecker;
-use crate::tools;
+use super::client::Woodpecker;
+use super::tools;
 
 /// Default write-mode window (minutes) when `WOODPECKER_WRITE_MINUTES` is unset.
 const DEFAULT_WRITE_MINUTES: u64 = 10;

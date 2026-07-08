@@ -1,29 +1,155 @@
-# forgejo-mcp-rs workspace
+# forgejo-mcp-rs
 
 [![CI](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions)
 
-A Cargo workspace of [Model Context Protocol](https://modelcontextprotocol.io/) servers for
-self-hosted forge infrastructure, sharing one small in-house REST/MCP core. Each server is an
-independent binary — load whichever you need in your MCP client; they share no runtime state.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server for
+[Forgejo](https://forgejo.org/) and [Codeberg](https://codeberg.org). It lets
+an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
+repositories, issues, and pull requests — over the Forgejo REST API.
 
-## Crates
+> Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
+> the forge — user, repos, issues, pull requests, search, orgs, notifications, comments,
+> reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `create_branch`,
+> `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`, push-mirror
+> management, and `dispatch_workflow`) gated behind a separate write token and a deliberate,
+> time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
-| Crate | Kind | What it is |
-|---|---|---|
-| [`forgejo-mcp`](crates/forgejo-mcp) | binary (`forgejo-mcp-rs`) | MCP server for **Forgejo / Codeberg** — user, repos, issues, pull requests, search, notifications, reviews, and Actions (CI), with opt-in guarded writes and push-mirror management. See its [README](crates/forgejo-mcp/README.md). |
-| [`woodpecker-mcp`](crates/woodpecker-mcp) | binary (`woodpecker-mcp`) | MCP server for **Woodpecker CI** — repos and pipelines, with guarded trigger/cancel/restart. |
-| [`mcp-core`](crates/mcp-core) | library (`forgejo-mcp-core`) | Shared scaffolding: a thin `RestClient` (Bearer/token auth), the time-boxed write-mode `Elevation` gate, pagination, and result helpers. |
+It speaks the Forgejo REST API directly through a small, in-house client (`src/forgejo/client.rs`,
+over the shared `src/mcp_core/` transport) — an **independent implementation over the documented
+API**, not a port of any other server. There is no third-party forge SDK in the trust path, so the
+tool surface holding your token is code you can read and audit end to end.
 
-## Build & install
+## Build
 
 ```sh
-cargo build --release                        # all binaries under target/release/
-cargo install --path crates/forgejo-mcp      # installs `forgejo-mcp-rs` to ~/.cargo/bin
-cargo install --path crates/woodpecker-mcp   # installs `woodpecker-mcp`
+cargo build --release          # binaries under target/release/
+cargo install --path .         # installs both binaries to ~/.cargo/bin
 ```
 
-Each server is configured entirely by environment variables (`FORGEJO_*` / `WOODPECKER_*`) and
-speaks the MCP stdio transport — see each crate's README for the variables and the client wiring.
+## Binaries
+
+This crate ships **two** MCP servers as separate binaries that share the in-house REST/MCP core
+(`src/mcp_core/`) as internal modules:
+
+- **`forgejo-mcp-rs`** — the Forgejo / Codeberg server documented below.
+- **`woodpecker-mcp`** — a companion server for [Woodpecker CI](https://woodpecker-ci.org/) when
+  it runs alongside your Forgejo instance: list repos and pipelines, and (guarded) trigger, cancel,
+  and restart pipelines. It uses `WOODPECKER_URL` and `WOODPECKER_TOKEN_READ_ONLY` /
+  `WOODPECKER_TOKEN_WRITE`, and the same time-boxed write-mode elevation as the Forgejo server.
+  Woodpecker addresses repositories by numeric id, so `lookup_repo` resolves an `owner/name` to it.
+
+They are separate processes with separate tokens and tool namespaces; enable whichever you need in
+your MCP client. The rest of this README covers the Forgejo server.
+
+## Configure
+
+The server is configured by environment variables:
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `FORGEJO_TOKEN_READ_ONLY` | **yes** | — | Read token (or `FORGEJO_TOKEN`). **Read-only scopes are enough.** |
+| `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Providing it enables the write tools**; omit it for a pure read-only server. |
+| `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
+| `FORGEJO_MIRROR_TOKEN` | no | — | Credential `add_push_mirror` sends as the remote's password (e.g. a GitHub PAT). Kept out of the conversation — never passed as a tool argument. Omit if you only use `use_ssh=true` mirrors. |
+| `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
+
+Mint a token at **Codeberg → Settings → Applications** (or your instance's equivalent). For
+the read tools, read scopes (`read:repository`, `read:issue`, `read:user`) suffice. The write
+token needs `write:repository` (including delete, and the repo-admin push-mirror endpoints).
+
+A **read token is mandatory**: the server refuses to start on a write token alone, and the
+read token must be a *different* token from `FORGEJO_TOKEN_WRITE` — you can't shortcut by
+reusing the write token for reads.
+
+> **Forgejo 15+ token scoping.** Forgejo 15.0 tightened authorization on many repository
+> APIs to match its fine-grained, repository-scoped access tokens. Classic broad tokens are
+> unaffected, but if you mint a *repository-scoped* token it must actually carry the scopes
+> above — in particular the repo-admin scope for the push-mirror tools, which otherwise return
+> `403`. Scope the token to every repo you intend to reach.
+
+### Write mode
+
+The server is **read-only by default.** `create_repo` / `delete_repo` work only when (a)
+`FORGEJO_TOKEN_WRITE` is configured **and** (b) you've deliberately entered **write mode** via
+`enable_write_mode` — a time-boxed elevation (default 10 min, max 60) that slides forward on
+each write and auto-reverts. `write_status` reports the state; `delete_repo` also requires a
+`confirm` argument equal to `"owner/repo"`. See [`SPECIFICATION.md`](SPECIFICATION.md#write-mode-deliberate-time-boxed-elevation)
+for the full design.
+
+### Wire it into Claude Code
+
+```sh
+claude mcp add --scope user forgejo /path/to/target/release/forgejo-mcp-rs \
+  --env FORGEJO_URL=https://codeberg.org \
+  --env FORGEJO_TOKEN_READ_ONLY=your_read_token_here
+# add --env FORGEJO_TOKEN_WRITE=… only if you want the (gated) write tools
+```
+
+### Or Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "forgejo": {
+      "command": "/path/to/target/release/forgejo-mcp-rs",
+      "env": { "FORGEJO_URL": "https://codeberg.org", "FORGEJO_TOKEN_READ_ONLY": "your_read_token_here" }
+    }
+  }
+}
+```
+
+Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUST_LOG`, e.g.
+`RUST_LOG=forgejo_mcp_rs=debug`.
+
+## Tools
+
+| Tool |  | Notes |
+|---|---|---|
+| `whoami` | read | The authenticated user (verifies the token) |
+| `version` | read | This MCP server's version + the connected Forgejo instance's version |
+| `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
+| `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default) |
+| `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default) |
+| `get_repo` | read | One repository's details (incl. default branch), slimmed |
+| `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
+| `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`) |
+| `search_repos` | read | Repository search by keyword |
+| `list_orgs` | read | Organizations you belong to |
+| `list_notifications` | read | Your notification threads, slimmed (`all=true` for read+unread) |
+| `list_issue_comments` | read | Comments on an issue/PR (slimmed) |
+| `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
+| `list_workflow_runs` | read | Forgejo Actions (CI) runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` (no separate conclusion) |
+| `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
+| `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
+| `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
+| `create_repo` | **write** | Create a repo (defaults to private) |
+| `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
+| `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
+| `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |
+| `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |
+| `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
+| `add_push_mirror` | **write** | Auto-push a repo to an external remote (e.g. a GitHub mirror); credential from `FORGEJO_MIRROR_TOKEN` or `use_ssh=true` |
+| `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
+| `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
+| `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
+| `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run |
+
+Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
+with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole
+set and return a `{ returned, total, truncated, items }` envelope; pass an explicit `page` or
+`limit` for a single page, which returns `{ page, limit, returned, total, items }` instead
+(`total` is `null` for `search_repos`, which reports no count). Repository, notification,
+comment, and review results are slimmed to the fields that matter. The **write** tools require
+write mode (above); `edit_repo` and editing existing issues/PRs are future work — see the
+[specification](SPECIFICATION.md).
+
+## Security
+
+The token is read from the environment only — never logged, never written to disk (the client
+holds it in a zeroized buffer and marks the `Authorization` header sensitive). Read-only by
+default, so the server cannot modify your account without a separate write token and write mode.
+Tool output is untrusted, repo-derived text — the server flags it as data, not instructions.
+See [`SPECIFICATION.md`](SPECIFICATION.md#security-model).
 
 ## Quality checks
 
@@ -38,6 +164,19 @@ CI runs the same on [Codeberg Forgejo Actions](.forgejo/workflows/ci.yml); a tra
 [`.githooks/pre-push`](.githooks/pre-push) hook mirrors it locally
 (`git config core.hooksPath .githooks`).
 
+## History
+
+Releases through v0.5 were built on the [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api)
+crate by Cyborus. `forgejo-mcp-rs` now talks to the Forgejo REST API through its own small
+client and carries no third-party forge SDK.
+
 ## License
 
 MIT — see [LICENSE.md](LICENSE.md) for details.
+
+## MCP registry
+
+Ownership-verification token for the [MCP registry](https://registry.modelcontextprotocol.io)
+(read from this crate's rendered README on crates.io):
+
+> Registry ownership token: `mcp-name: io.github.brechanbech/forgejo-mcp-rs`

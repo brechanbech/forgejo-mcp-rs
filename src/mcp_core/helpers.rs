@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::error::ApiError;
+use super::error::ApiError;
 
 /// Maps an [`ApiError`] to an MCP error. Caller-side rejections (bad token, missing resource,
 /// validation — any 4xx) are `invalid_params`; transport, 5xx, and decode failures are ours

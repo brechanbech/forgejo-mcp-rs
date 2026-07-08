@@ -1,28 +1,28 @@
 //! The Woodpecker CI endpoint set.
 //!
 //! The transport — Bearer auth, JSON decoding, pagination plumbing — lives in
-//! [`mcp_core::RestClient`]; [`Woodpecker`] is a thin newtype over it that adds just the
+//! [`crate::mcp_core::RestClient`]; [`Woodpecker`] is a thin newtype over it that adds just the
 //! endpoint methods. Every response is returned as raw JSON ([`serde_json::Value`]); the tool
-//! layer ([`crate::tools`]) reshapes it.
+//! layer ([`crate::woodpecker::tools`]) reshapes it.
 //!
 //! Woodpecker addresses repositories by their numeric `repo_id` (not `owner/name`); the
 //! `lookup/{owner}/{name}` endpoint resolves a full name to that id. List endpoints return bare
 //! JSON arrays with no `X-Total-Count`, and paginate with `page` / `perPage` (default 50), so
-//! [`mcp_core::gather_all`] detects the end by a short final page.
+//! [`crate::mcp_core::gather_all`] detects the end by a short final page.
 //!
-//! Errors funnel through [`mcp_core::ApiError`], re-exported here as [`WoodpeckerError`].
+//! Errors funnel through [`crate::mcp_core::ApiError`], re-exported here as [`WoodpeckerError`].
 
-use mcp_core::{Auth, RestClient, RestConfig};
+use crate::mcp_core::{Auth, RestClient, RestConfig};
 use serde_json::Value;
 use url::Url;
 
-pub use mcp_core::ApiError as WoodpeckerError;
+pub use crate::mcp_core::ApiError as WoodpeckerError;
 
 /// Woodpecker REST API path prefix; joined onto the instance base URL.
 const API_PREFIX: &str = "api/";
 
 /// Builds the `page` / `perPage` query pairs, skipping any that are unset. (Woodpecker names the
-/// page-size parameter `perPage`, unlike the `limit` that [`mcp_core::paging`] emits.)
+/// page-size parameter `perPage`, unlike the `limit` that [`crate::mcp_core::paging`] emits.)
 fn paging(page: Option<u32>, per_page: Option<u32>) -> Vec<(&'static str, String)> {
     let mut query = Vec::new();
     if let Some(page) = page {

@@ -1,20 +1,20 @@
 //! Tool implementations — thin wrappers over the in-house [`Woodpecker`] REST client.
 //!
 //! Each function maps a Woodpecker API call to a [`CallToolResult`]. The server's `#[tool]`
-//! methods in [`crate::server`] delegate here, so that file reads as an index of the surface and
+//! methods in [`crate::woodpecker::server`] delegate here, so that file reads as an index of the surface and
 //! the real work lives here. Full-resource endpoints pass the raw API JSON straight through; list
-//! endpoints auto-paginate to completion by default (see [`mcp_core::gather_all`]).
+//! endpoints auto-paginate to completion by default (see [`crate::mcp_core::gather_all`]).
 
-use mcp_core::{gather_all, gathered_result, into_items, json_result, paged_result, to_mcp};
+use crate::mcp_core::{gather_all, gathered_result, into_items, json_result, paged_result, to_mcp};
 use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde_json::Value;
 
-use crate::client::Woodpecker;
+use super::client::Woodpecker;
 
 /// Page-size used per request while auto-paginating list endpoints — matches Woodpecker's default
-/// `perPage`, and [`mcp_core::gather_all`] verifies the effective size from the first page anyway.
+/// `perPage`, and [`crate::mcp_core::gather_all`] verifies the effective size from the first page anyway.
 const AUTO_PER_PAGE: u32 = 50;
 
 /// Pagination parameters shared by the list tools. Omit both to auto-paginate the whole list;

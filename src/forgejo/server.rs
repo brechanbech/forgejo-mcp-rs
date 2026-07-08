@@ -1,13 +1,13 @@
 //! The MCP server type and its tool definitions.
 //!
 //! [`ForgejoMcp`] holds the Forgejo API client and registers the tools. Each `#[tool]`
-//! method is a thin wrapper that delegates to a function in [`crate::tools`], keeping this
+//! method is a thin wrapper that delegates to a function in [`crate::forgejo::tools`], keeping this
 //! file a readable index of the server's surface.
 
 use std::sync::Arc;
 
+use crate::mcp_core::{Elevation, json_result};
 use anyhow::Context as _;
-use mcp_core::{Elevation, json_result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
@@ -15,8 +15,8 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::forge::Forge;
-use crate::tools;
+use super::client::Forge;
+use super::tools;
 
 /// Default Forgejo instance — Codeberg.
 const DEFAULT_URL: &str = "https://codeberg.org";
@@ -611,7 +611,7 @@ mod tests {
     }
 
     /// A server with dummy clients (no network is touched by the logic under test). The
-    /// write-mode gating itself is tested in `mcp_core::Elevation`; here we only cover the
+    /// write-mode gating itself is tested in `crate::mcp_core::Elevation`; here we only cover the
     /// forge-specific mirror-token plumbing.
     fn server(with_write: bool) -> ForgejoMcp {
         let url = Url::parse("https://codeberg.org").unwrap();

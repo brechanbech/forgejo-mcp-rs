@@ -22,7 +22,7 @@ pub enum ApiError {
 
 impl ApiError {
     /// Whether this is the caller's fault (a 4xx) rather than ours (config / transport / 5xx /
-    /// decode). Drives the MCP error mapping in [`crate::to_mcp`].
+    /// decode). Drives the MCP error mapping in [`super::to_mcp`].
     #[must_use]
     pub fn is_caller_error(&self) -> bool {
         matches!(self, ApiError::Status { code, .. } if code.is_client_error())

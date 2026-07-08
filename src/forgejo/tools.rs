@@ -1,25 +1,25 @@
 //! Tool implementations — thin wrappers over the in-house [`Forge`] REST client.
 //!
 //! Each function maps a Forgejo API call to a [`CallToolResult`]. The server's `#[tool]`
-//! methods in [`crate::server`] delegate here, so that file reads as an index of the
+//! methods in [`crate::forgejo::server`] delegate here, so that file reads as an index of the
 //! surface and the real work lives here. (Promote to a `tools/` directory once it grows.)
 //!
 //! The client returns raw API JSON ([`Value`]); full-resource endpoints pass it straight
 //! through, while list endpoints that we slim (notifications, comments) deserialize into
 //! local shapes first.
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use mcp_core::{
+use crate::mcp_core::{
     decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::forge::Forge;
+use super::client::Forge;
 
 /// Returns the authenticated user — proof the token works.
 pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
@@ -728,7 +728,7 @@ pub async fn list_pull_request_reviews(
     paged_result(params.page, params.limit, total, &items)
 }
 
-// --- write tools (require write mode; see crate::server) ---
+// --- write tools (require write mode; see crate::forgejo::server) ---
 
 /// Parameters for the `enable_write_mode` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]

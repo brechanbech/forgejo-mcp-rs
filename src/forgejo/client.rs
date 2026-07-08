@@ -2,18 +2,18 @@
 //!
 //! `forgejo-mcp-rs` only touches ~20 endpoints, so rather than depend on a third-party SDK we
 //! speak the documented Forgejo REST API directly. The transport — auth, JSON decoding,
-//! `X-Total-Count` — lives in [`mcp_core::RestClient`]; [`Forge`] is a thin newtype over it that
+//! `X-Total-Count` — lives in [`crate::mcp_core::RestClient`]; [`Forge`] is a thin newtype over it that
 //! adds just the endpoint methods. Every response is returned as raw JSON
-//! ([`serde_json::Value`]); the tool layer ([`crate::tools`]) reshapes it.
+//! ([`serde_json::Value`]); the tool layer ([`crate::forgejo::tools`]) reshapes it.
 //!
-//! Errors funnel through [`mcp_core::ApiError`], re-exported here as [`ForgeError`] for the
+//! Errors funnel through [`crate::mcp_core::ApiError`], re-exported here as [`ForgeError`] for the
 //! existing call sites.
 
-use mcp_core::{Auth, RestClient, RestConfig, paging};
+use crate::mcp_core::{Auth, RestClient, RestConfig, paging};
 use serde_json::Value;
 use url::Url;
 
-pub use mcp_core::ApiError as ForgeError;
+pub use crate::mcp_core::ApiError as ForgeError;
 
 /// Forgejo REST API path prefix; joined onto the instance base URL.
 const API_PREFIX: &str = "api/v1/";
