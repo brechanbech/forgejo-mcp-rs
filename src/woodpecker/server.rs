@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::mcp_core::{Elevation, json_result};
+use crate::mcp_core::{Elevation, TokenEnv, json_result, resolve_tokens};
 use anyhow::Context as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -63,6 +63,12 @@ impl WoodpeckerMcp {
             std::env::var("WOODPECKER_TOKEN_READ_ONLY").ok(),
             std::env::var("WOODPECKER_TOKEN").ok(),
             std::env::var("WOODPECKER_TOKEN_WRITE").ok(),
+            TokenEnv {
+                read_only: "WOODPECKER_TOKEN_READ_ONLY",
+                legacy: "WOODPECKER_TOKEN",
+                write: "WOODPECKER_TOKEN_WRITE",
+                kind: "a personal access token",
+            },
         )?;
         let woodpecker = Woodpecker::new(&url, &read_token)
             .map_err(|e| anyhow::anyhow!("building the read client: {e}"))?;
@@ -108,30 +114,6 @@ impl WoodpeckerMcp {
     fn window_note(&self) -> String {
         self.elevation.window_note()
     }
-}
-
-/// Resolves the read token (required) and optional write token from their env values, enforcing
-/// two rules: a dedicated read token must exist (a write token alone is refused), and the read
-/// token must differ from the write token. Empty strings count as unset.
-fn resolve_tokens(
-    read_only: Option<String>,
-    legacy: Option<String>,
-    write: Option<String>,
-) -> anyhow::Result<(String, Option<String>)> {
-    let nonempty = |value: Option<String>| value.filter(|s| !s.is_empty());
-    let read = nonempty(read_only).or_else(|| nonempty(legacy)).context(
-        "a read-only token is required: set WOODPECKER_TOKEN_READ_ONLY (or WOODPECKER_TOKEN) to a \
-         personal access token. A write token alone is refused — reads must use a dedicated \
-         token, even though a write token could technically read.",
-    )?;
-    let write = nonempty(write);
-    if write.as_deref() == Some(read.as_str()) {
-        anyhow::bail!(
-            "the read token and WOODPECKER_TOKEN_WRITE must be different tokens — put a separate \
-             read-only token in the read slot, not a copy of the write token."
-        );
-    }
-    Ok((read, write))
 }
 
 /// Read-only Woodpecker tools.

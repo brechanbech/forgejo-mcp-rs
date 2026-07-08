@@ -18,6 +18,7 @@ mod error;
 // sites (they use it by value, not by name, so it isn't re-exported below).
 pub(crate) mod helpers;
 mod rest;
+mod tokens;
 
 pub use elevation::Elevation;
 pub use error::ApiError;
@@ -25,6 +26,7 @@ pub use helpers::{
     decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
 };
 pub use rest::{Auth, RestClient, RestConfig, paging};
+pub use tokens::{TokenEnv, resolve_tokens};
 
 use tracing_subscriber::EnvFilter;
 

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::mcp_core::{Elevation, json_result};
+use crate::mcp_core::{Elevation, TokenEnv, json_result, resolve_tokens};
 use anyhow::Context as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -68,6 +68,12 @@ impl ForgejoMcp {
             std::env::var("FORGEJO_TOKEN_READ_ONLY").ok(),
             std::env::var("FORGEJO_TOKEN").ok(),
             std::env::var("FORGEJO_TOKEN_WRITE").ok(),
+            TokenEnv {
+                read_only: "FORGEJO_TOKEN_READ_ONLY",
+                legacy: "FORGEJO_TOKEN",
+                write: "FORGEJO_TOKEN_WRITE",
+                kind: "a read-scoped token",
+            },
         )?;
         let forgejo = Forge::new(&url, &read_token)
             .map_err(|e| anyhow::anyhow!("building the read client: {e}"))?;
@@ -126,31 +132,6 @@ impl ForgejoMcp {
     fn window_note(&self) -> String {
         self.elevation.window_note()
     }
-}
-
-/// Resolves the read token (required) and optional write token from their env values, while
-/// enforcing two rules: a dedicated read token must exist (a write token alone is refused —
-/// even though it could read), and the read token must differ from the write token (no
-/// reusing the write token in the read slot). Empty strings count as unset.
-fn resolve_tokens(
-    read_only: Option<String>,
-    legacy: Option<String>,
-    write: Option<String>,
-) -> anyhow::Result<(String, Option<String>)> {
-    let nonempty = |value: Option<String>| value.filter(|s| !s.is_empty());
-    let read = nonempty(read_only).or_else(|| nonempty(legacy)).context(
-        "a read-only token is required: set FORGEJO_TOKEN_READ_ONLY (or FORGEJO_TOKEN) to a \
-         read-scoped token. A write token alone is refused — reads must use a dedicated \
-         read-only token, even though a write token could technically read.",
-    )?;
-    let write = nonempty(write);
-    if write.as_deref() == Some(read.as_str()) {
-        anyhow::bail!(
-            "the read token and FORGEJO_TOKEN_WRITE must be different tokens — put a separate \
-             read-only token in the read slot, not a copy of the write token."
-        );
-    }
-    Ok((read, write))
 }
 
 /// Read-only Forgejo tools.
@@ -573,42 +554,7 @@ impl ServerHandler for ForgejoMcp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Elevation, Forge, ForgejoMcp, MAX_WRITE_MINUTES, Url, resolve_tokens};
-
-    #[test]
-    fn read_token_is_required() {
-        assert!(
-            resolve_tokens(None, None, None).is_err(),
-            "nothing -> refused"
-        );
-        // The "clever" case: a write token alone is refused.
-        assert!(
-            resolve_tokens(None, None, Some("w".into())).is_err(),
-            "write token only -> refused"
-        );
-        // Empty strings count as unset.
-        assert!(resolve_tokens(Some(String::new()), None, Some("w".into())).is_err());
-    }
-
-    #[test]
-    fn read_and_write_must_differ() {
-        assert!(
-            resolve_tokens(Some("same".into()), None, Some("same".into())).is_err(),
-            "read == write -> refused"
-        );
-        let (r, w) = resolve_tokens(Some("r".into()), None, Some("w".into())).unwrap();
-        assert_eq!((r.as_str(), w.as_deref()), ("r", Some("w")));
-    }
-
-    #[test]
-    fn read_token_resolves_with_fallback_and_no_write() {
-        // FORGEJO_TOKEN fallback works; no write token -> read-only.
-        let (r, w) = resolve_tokens(None, Some("legacy".into()), None).unwrap();
-        assert_eq!((r.as_str(), w), ("legacy", None));
-        // An empty write token is treated as unset (not equal-to-read failure).
-        let (r, w) = resolve_tokens(Some("r".into()), None, Some(String::new())).unwrap();
-        assert_eq!((r.as_str(), w), ("r", None));
-    }
+    use super::{Arc, Elevation, Forge, ForgejoMcp, MAX_WRITE_MINUTES, Url};
 
     /// A server with dummy clients (no network is touched by the logic under test). The
     /// write-mode gating itself is tested in `crate::mcp_core::Elevation`; here we only cover the
