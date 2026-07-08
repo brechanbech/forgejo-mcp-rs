@@ -17,27 +17,54 @@ shell-scripting `curl` against the API or trusting a pre-built third-party serve
 token. It is an **independent implementation over the documented Forgejo API**, not a port
 of any existing server.
 
+A **companion Woodpecker CI server** (`woodpecker-mcp`) ships in the same crate for the common
+self-hosted arrangement where Woodpecker runs alongside Forgejo: it inspects repositories and
+pipelines and, under the same time-boxed write mode, triggers / cancels / restarts them. It is a
+second binary — separate process, separate token, separate tool namespace — reusing the shared
+core, not a Forgejo feature. The two are decoupled at the process level but bundled in one crate
+because, in practice, they are deployed together (see the collapse rationale in Milestones).
+**Either binary runs standalone**: `woodpecker-mcp` has no runtime dependency on the Forgejo server,
+and `cargo install --bin <name>` installs just one — the bundling is packaging, not coupling.
+
 ## Architecture
 
-A single binary crate. The tool layer sits over a small, in-house Forgejo REST client
-(`src/forge/`) built on `reqwest` — the ~14 endpoints we touch, no third-party forge SDK.
+One crate, `forgejo-mcp-rs`, providing **two MCP server binaries** that share an in-house
+REST/MCP core as internal modules. The Forgejo server is the primary; the Woodpecker server is a
+companion for instances that run [Woodpecker CI](https://woodpecker-ci.org/) alongside Forgejo.
+They run as **separate processes with separate tokens and tool namespaces** — not one server with
+two toolsets — so a token for one never sits in the other's process.
 
 ```
-forge::Forge   →  in-house REST client (auth, ~14 endpoints, pagination)  ← src/forge/
+mcp_core    →  shared transport: RestClient (Auth::{Token,Bearer} + api-prefix),   ← src/mcp_core/
+               ApiError, the Elevation<C> write-mode gate, pagination & helpers
    ↑
-forgejo-mcp-rs  →  #[tool] methods mapping to the calls we use            ← this crate
+forgejo     →  Forge(RestClient) + #[tool] methods  →  forgejo-mcp-rs binary        ← src/forgejo/
+woodpecker  →  Woodpecker(RestClient) + #[tool] methods  →  woodpecker-mcp binary   ← src/woodpecker/
 ```
 
-- `src/main.rs` — `#[tokio::main]`; logs to **stderr** (stdout is the MCP stdio transport);
-  builds the server from the environment; serves over stdio.
-- `src/forge/` — `Forge`, the REST client: base-URL/`api/v1` joining, a zeroized token sent as
-  `Authorization: token …`, one `request()` helper, and a typed method per endpoint returning
-  raw JSON (`serde_json::Value`). `error.rs` holds `ForgeError` (config / transport / non-2xx
-  status / decode), which knows whether a failure is the caller's (4xx) or ours.
-- `src/server.rs` — `ForgejoMcp { tool_router, forgejo: Arc<Forge> }`; `from_env()`;
-  the `#[tool_router]` block; the `ServerHandler` with instructions.
-- `src/tools.rs` — `to_mcp(ForgeError)` error mapping and the tool functions; the server's
-  `#[tool]` methods delegate here. (Promoted to a `tools/` directory once it grows.)
+- `src/lib.rs` — declares the three modules. `mcp_core` is `pub(crate)`: it is internal
+  scaffolding, not a public library surface — the crate exists to provide the two binaries.
+- `src/mcp_core/` — the shared, forge-agnostic core, built on `reqwest`:
+  - `rest.rs` — `RestClient`: base-URL/api-prefix joining, a zeroized token presented per an
+    `Auth` scheme (`token …` for Forgejo, `Bearer …` for Woodpecker), one `request()` helper, and
+    `get` / `get_list` / `post` / `post_none` / `post_empty` / `delete` verbs returning raw JSON
+    (`serde_json::Value`).
+  - `error.rs` — `ApiError` (config / transport / non-2xx status / decode), which knows whether a
+    failure is the caller's (4xx) or ours.
+  - `elevation.rs` — `Elevation<C>`, the generic time-boxed write-mode gate (see Security model),
+    reused by both servers over their respective write clients.
+  - `helpers.rs` — `to_mcp(ApiError)` mapping, `json_result`, the auto-paginator (`gather_all`),
+    and the paged/gathered result envelopes.
+  - `mod.rs` — re-exports and `init_tracing`.
+- `src/forgejo/` — the Forgejo server: `client.rs` (`Forge`, the `api/v1/` + `Authorization: token`
+  endpoint set), `tools.rs` (tool functions), `server.rs` (`ForgejoMcp { tool_router, forgejo,
+  elevation, mirror_token }`, its `#[tool_router]`, and the `ServerHandler`), and `mod.rs::serve()`
+  (the stdio entry point).
+- `src/woodpecker/` — the Woodpecker server, same shape: `client.rs` (`Woodpecker`, `api/` +
+  `Authorization: Bearer`, repos keyed by numeric `repo_id` with a `lookup/{owner}/{name}`
+  resolver), `tools.rs`, `server.rs` (`WoodpeckerMcp`), and `mod.rs::serve()`.
+- `src/bin/{forgejo,woodpecker}.rs` — thin `#[tokio::main]` wrappers that call the respective
+  module `serve()`. Logs go to **stderr** (stdout is the MCP stdio transport).
 
 Built on `rmcp 1.7`. Conventions (lints, CI, pre-push, deny/clippy config) mirror the
 sibling `kicad-mcp-rs` project.
@@ -59,6 +86,16 @@ write token could technically read — and the read token **must differ** from
 token's *scope* without probing, so this is a structural guard (presence + distinctness), not
 a scope check.
 
+The **Woodpecker server** (`woodpecker-mcp`) takes the analogous variables — same read/write
+discipline, different names:
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `WOODPECKER_URL` | **yes** | — | Instance base URL (self-hosted; there is no default). |
+| `WOODPECKER_TOKEN_READ_ONLY` | **yes** | — | Personal access token. `WOODPECKER_TOKEN` is accepted as a fallback. |
+| `WOODPECKER_TOKEN_WRITE` | no | — | Push-scoped token; its presence enables the pipeline write tools. |
+| `WOODPECKER_WRITE_MINUTES` | no | `10` | Default write-mode window, clamped to `1..=60`. |
+
 ## Security model
 
 - Tokens are read **from the environment only** — never a CLI argument, never written to a
@@ -75,8 +112,10 @@ a scope check.
 
 ### Write mode (deliberate, time-boxed elevation)
 
-Even with a write token present, the server **starts read-only** and writes are refused until
-the model deliberately elevates — "sudo with a timeout":
+This mechanism is the generic `Elevation<C>` gate in `mcp_core`; **both servers use it** — the
+Forgejo write tools and the Woodpecker pipeline-action tools are gated identically (the examples
+below are Forgejo's). Even with a write token present, a server **starts read-only** and writes
+are refused until the model deliberately elevates — "sudo with a timeout":
 
 - `enable_write_mode(minutes?)` activates write mode for `minutes` (default `FORGEJO_WRITE_MINUTES`,
   **hard-capped at 60** — there is deliberately no permanent mode). `disable_write_mode` ends it.
@@ -167,11 +206,36 @@ landed across v0.3–v0.11 and are listed in the README's current tool table rat
 repo has the Actions unit disabled, not that there are no runs. Verified end-to-end against a
 live dispatched run on Codeberg's Forgejo 15.
 
+### v0.13 — the `woodpecker-mcp` companion server
+
+A second binary (see Architecture and Purpose) targeting Woodpecker CI. Woodpecker authenticates
+with `Authorization: Bearer`, prefixes its API with `api/`, addresses repositories by numeric
+`repo_id`, and paginates with `page` / `perPage` returning bare arrays (no `X-Total-Count`, so the
+auto-paginator ends on a short page). The write tools reuse the shared `Elevation` gate.
+
+| Tool | Status | Purpose |
+|---|---|---|
+| `whoami` | **done** | The authenticated user (verifies the token). |
+| `list_repos` | **done** | Repos the user can access (auto-paginated). |
+| `lookup_repo` | **done** | Resolve `owner/name` → the repo record, incl. the numeric `id` the other tools need. |
+| `get_repo` | **done** | One repository by `repo_id`. |
+| `list_pipelines` | **done** | A repo's pipeline runs, newest first (a run's outcome is its `status`). |
+| `get_pipeline` | **done** | One pipeline by its per-repo number. |
+| `write_status` / `enable_write_mode` / `disable_write_mode` | **done** | Write-mode state and elevation (as in the Forgejo server). |
+| `trigger_pipeline` | **done** | Write-mode. Start a pipeline (optional `branch`, `variables`). |
+| `cancel_pipeline` | **done** | Write-mode. Cancel a running pipeline. |
+| `restart_pipeline` | **done** | Write-mode. Re-run a pipeline; returns the new run. |
+
+Endpoint shapes were taken from Woodpecker's `server/router/api.go`, not assumed. The list tools
+currently pass pipeline/repo JSON straight through (no slimming yet). There is no Woodpecker
+`version`/instance tool yet.
+
 ## Error handling
 
-`ForgeError`s map to MCP errors in `tools::to_mcp`, keyed off `ForgeError::is_caller_error`:
+`ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
 an HTTP 4xx (bad token, not found, bad request) becomes `invalid_params` (the caller's
-problem); config, transport, 5xx, and decode failures become `internal_error`.
+problem); config, transport, 5xx, and decode failures become `internal_error`. (In the forge
+clients the type is re-exported as `ForgeError` / `WoodpeckerError` for readability.)
 
 ## Concurrency & testing
 
@@ -188,11 +252,13 @@ a real client) so slow responses can return.
 
 ## Non-goals
 
-- Not a full Forgejo SDK — the in-house `forge` client covers only the ~17 endpoints the
-  assistant needs, not the whole REST surface.
+- Not a full Forgejo (or Woodpecker) SDK — the in-house `mcp_core` client covers only the ~30
+  endpoints the two servers touch, not the whole REST surface of either.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
-- No webhooks, admin, or CI-control tooling in v0.1.
+- No webhooks or admin tooling. CI control is limited to dispatch (Forgejo) and
+  trigger/cancel/restart (Woodpecker) — with **no log or artifact retrieval**, as neither forge
+  exposes a repo-level endpoint for it.
 
 ### CI status: dropped via commit-status, later solved via the Actions-runs API (v0.12.0)
 
@@ -224,7 +290,8 @@ contributions, which is their call to make.
 Rather than fork and carry patches against a crate whose author would prefer not to be part of
 this, we removed the dependency. The tool surface only touches ~14 endpoints, all plain JSON,
 and we were already reshaping much of the output into local types — so a small `reqwest`-based
-client (`src/forge/`) is a proportionate replacement that we fully own and can audit. The
+client (then `src/forge/`, now the shared `src/mcp_core/` + `src/forgejo/client.rs`) is a
+proportionate replacement that we fully own and can audit. The
 strict-enum gaps simply don't exist when we define the response shapes ourselves (loose where
 it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dependency tree.
 
@@ -232,5 +299,16 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
 
 1. **v0.1.0** — read-only surface, validated against live Codeberg, tagged. *(done)*
 2. **v0.2.0** — write mode + repo management (`create_repo` / `delete_repo`) behind a separate
-   write token and deliberate, time-boxed elevation.
-3. Later — `edit_repo`, issue/PR writes, slimmed output, sort filters.
+   write token and deliberate, time-boxed elevation. *(done)*
+3. **v0.3–v0.11** — dropped `forgejo-api` for the in-house client; added `create_branch`,
+   `create_pull_request`, `comment_on_issue`, `list_pull_request_reviews`, and the push-mirror
+   set. *(done)*
+4. **v0.12.0** — Forgejo Actions (CI): `list_workflow_runs`, `get_workflow_run`,
+   `dispatch_workflow`. *(done)*
+5. **v0.13.0** — extracted the shared `mcp_core` (generic `RestClient` + `Elevation<C>`) and added
+   the companion `woodpecker-mcp` server. Briefly a three-crate workspace (with a published
+   `forgejo-mcp-core`), then **collapsed to one crate + two binaries** once it was clear Woodpecker
+   only runs in tandem with Forgejo and crates.io is the project's only real discovery surface — one
+   legible crate beats a trio with an internal helper crate on display. *(done)*
+6. Later — `edit_repo`, issue/PR writes, slimmed Woodpecker/passthrough output, sort filters, a
+   Woodpecker `version`/instance tool.

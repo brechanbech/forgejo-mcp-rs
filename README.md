@@ -22,8 +22,9 @@ tool surface holding your token is code you can read and audit end to end.
 ## Build
 
 ```sh
-cargo build --release          # binaries under target/release/
-cargo install --path .         # installs both binaries to ~/.cargo/bin
+cargo build --release                        # both binaries under target/release/
+cargo install --path .                       # install both to ~/.cargo/bin
+cargo install --path . --bin woodpecker-mcp  # …or just one (--bin forgejo-mcp-rs for the other)
 ```
 
 ## Binaries
@@ -38,8 +39,13 @@ This crate ships **two** MCP servers as separate binaries that share the in-hous
   `WOODPECKER_TOKEN_WRITE`, and the same time-boxed write-mode elevation as the Forgejo server.
   Woodpecker addresses repositories by numeric id, so `lookup_repo` resolves an `owner/name` to it.
 
-They are separate processes with separate tokens and tool namespaces; enable whichever you need in
-your MCP client. The rest of this README covers the Forgejo server.
+Each runs **independently** — same crate, but no runtime coupling. `woodpecker-mcp` needs only
+`WOODPECKER_URL` and a Woodpecker token and works with or without the Forgejo server installed;
+"companion" just means Woodpecker CI is usually deployed alongside Forgejo, not that either server
+depends on the other. So you needn't install both: `cargo install --path .` builds both, or add
+`--bin woodpecker-mcp` (or `--bin forgejo-mcp-rs`) to install just one. Enable whichever you need in
+your MCP client — the Forgejo server is documented first, the Woodpecker server has its own section
+([below](#woodpecker-server-woodpecker-mcp)).
 
 ## Configure
 
@@ -143,6 +149,55 @@ comment, and review results are slimmed to the fields that matter. The **write**
 write mode (above); `edit_repo` and editing existing issues/PRs are future work — see the
 [specification](SPECIFICATION.md).
 
+## Woodpecker server (`woodpecker-mcp`)
+
+The companion server for a [Woodpecker CI](https://woodpecker-ci.org/) instance running alongside
+your Forgejo. It reads repositories and pipelines and, behind the same write mode, triggers,
+cancels, and restarts them — a separate process with its own token and tool namespace.
+
+### Configure
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `WOODPECKER_URL` | **yes** | — | Instance base URL (self-hosted; there is no default). |
+| `WOODPECKER_TOKEN_READ_ONLY` | **yes** | — | Personal access token (or `WOODPECKER_TOKEN`). |
+| `WOODPECKER_TOKEN_WRITE` | no | — | Push-scoped token. **Providing it enables the pipeline write tools.** |
+| `WOODPECKER_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
+
+Mint a personal access token from your Woodpecker profile (the user menu, top right). The same
+read/write discipline as the Forgejo server applies: a read token is mandatory and must differ from
+`WOODPECKER_TOKEN_WRITE`, and write mode works identically — `enable_write_mode` elevates for a
+sliding, capped window and `write_status` reports it.
+
+Woodpecker addresses repositories by a **numeric `repo_id`**, not `owner/name`. Use `lookup_repo`
+(or read the `id` from `list_repos`) to resolve a name to its id, then pass that id to the other
+tools.
+
+### Wire it into Claude Code
+
+```sh
+claude mcp add --scope user woodpecker /path/to/target/release/woodpecker-mcp \
+  --env WOODPECKER_URL=https://ci.example.org \
+  --env WOODPECKER_TOKEN_READ_ONLY=your_read_token_here
+# add --env WOODPECKER_TOKEN_WRITE=… only if you want the (gated) pipeline write tools
+```
+
+### Tools
+
+| Tool |  | Notes |
+|---|---|---|
+| `whoami` | read | The authenticated user (verifies the token) |
+| `list_repos` | read | Repositories you can access (auto-paginated); each item carries the numeric `id` |
+| `lookup_repo` | read | Resolve `owner/name` → the repo record, including its numeric `id` |
+| `get_repo` | read | One repository's details by `repo_id` |
+| `list_pipelines` | read | A repo's pipeline runs by `repo_id`, newest first (auto-paginated); a run's outcome is its `status` |
+| `get_pipeline` | read | One pipeline by `repo_id` + its per-repo `number` |
+| `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
+| `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
+| `trigger_pipeline` | **write** | Start a pipeline (`repo_id`, optional `branch` and `variables`) |
+| `cancel_pipeline` | **write** | Cancel a running pipeline (`repo_id`/`number`) |
+| `restart_pipeline` | **write** | Re-run a pipeline (`repo_id`/`number`); returns the new run |
+
 ## Security
 
 The token is read from the environment only — never logged, never written to disk (the client
@@ -173,10 +228,3 @@ client and carries no third-party forge SDK.
 ## License
 
 MIT — see [LICENSE.md](LICENSE.md) for details.
-
-## MCP registry
-
-Ownership-verification token for the [MCP registry](https://registry.modelcontextprotocol.io)
-(read from this crate's rendered README on crates.io):
-
-> Registry ownership token: `mcp-name: io.github.brechanbech/forgejo-mcp-rs`
