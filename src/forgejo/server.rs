@@ -201,7 +201,9 @@ impl ForgejoMcp {
     }
 
     /// Gets one repository's details.
-    #[tool(description = "Get one repository's details (owner/repo), including its default branch")]
+    #[tool(
+        description = "Get one repository's details (owner/repo), including its default branch and size (KiB)"
+    )]
     async fn get_repo(
         &self,
         Parameters(params): Parameters<tools::RepoRef>,

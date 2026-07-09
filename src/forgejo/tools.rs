@@ -191,6 +191,9 @@ struct RepoSummary {
     open_issues_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_pr_counter: Option<i64>,
+    /// Repository size on disk, in KiB (git data plus LFS), as reported by Forgejo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1249,6 +1252,7 @@ mod tests {
             "stars_count": 0,
             "forks_count": 0,
             "open_issues_count": 0,
+            "size": 101,
             "html_url": "https://codeberg.org/brechanbech/sec-mcp",
             // Verbose/nested fields that must NOT survive the slim:
             "owner": { "login": "brechanbech", "email": "person@example.com" },
@@ -1262,6 +1266,7 @@ mod tests {
         assert_eq!(v["full_name"], "brechanbech/sec-mcp");
         assert_eq!(v["language"], "Rust");
         assert_eq!(v["stars_count"], 0);
+        assert_eq!(v["size"], 101);
         // Nested objects (and the owner's email) are dropped.
         assert!(v.get("owner").is_none());
         assert!(v.get("internal_tracker").is_none());

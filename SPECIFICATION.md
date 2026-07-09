@@ -139,7 +139,10 @@ token-broker process, which is out of scope.
 | Tool | Status | Purpose |
 |---|---|---|
 | `whoami` | **done** | The authenticated user (verifies the token). |
-| `list_my_repos` | **done** | Repositories owned by the token's user (first page). |
+| `list_my_repos` | **done** | Repositories owned by the token's user (auto-paginated, slimmed). |
+| `get_repo` | **done** | One repository's details (incl. default branch and size in KiB), slimmed. |
+| `list_branches` | **done** | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected). |
+| `get_file_contents` | **done** | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). |
 | `list_issues` | **done** | Issues in `owner/repo` (open by default). |
 | `get_issue` | **done** | One issue by number. |
 | `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default). |
@@ -148,9 +151,13 @@ token-broker process, which is out of scope.
 | `list_orgs` | **done** | Organizations the user belongs to. |
 | `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
 | `list_issue_comments` | **done** | Comments on an issue/PR, slimmed. |
+| `list_workflow_runs` | **done** | Actions runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. |
+| `get_workflow_run` | **done** | One Actions run by id (a run's outcome is its `status`). |
+| `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run by workflow file name. |
 
 Each tool returns the relevant Forgejo API JSON, pretty-printed. Full-resource endpoints pass
-the raw response straight through; the slimmed tools (notifications, comments) reshape it.
+the raw response straight through; the slimmed tools (repositories, branches, notifications,
+comments, workflow runs) reshape it into a compact local struct.
 
 The list tools accept optional `state` (`open`/`closed`/`all`, on issues and pull requests)
 and `page` / `limit` pagination (sent as query parameters). An invalid `state` is rejected
