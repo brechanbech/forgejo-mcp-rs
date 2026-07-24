@@ -367,6 +367,21 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    /// Edits repository settings (visibility, description, default branch, feature toggles).
+    #[tool(
+        description = "Edit repository settings: visibility (private true/false), description, website, default_branch, issues/PRs/wiki toggles, archived. Only provided fields change; renames are not supported. Requires write mode."
+    )]
+    async fn edit_repo(
+        &self,
+        Parameters(params): Parameters<tools::EditRepoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::edit_repo(client, params).await?;
+        self.extend_window();
+        result.content.push(Content::text(self.window_note()));
+        Ok(result)
+    }
+
     /// Creates an issue in a repository.
     #[tool(
         description = "Create an issue in a repository (owner/repo/title, optional body; requires write mode)"
@@ -533,7 +548,8 @@ impl ServerHandler for ForgejoMcp {
             "Tools for inspecting a Forgejo/Codeberg account and its repositories (user, \
              repos, issues, pull requests, search). Configured via FORGEJO_URL and \
              FORGEJO_TOKEN. \
-             The server is READ-ONLY by default. Repository writes (create_repo, delete_repo) \
+             The server is READ-ONLY by default. Repository writes (create_repo, edit_repo, \
+             delete_repo) \
              require BOTH a configured write token and deliberately entering write mode via \
              enable_write_mode — a time-boxed elevation (default 10 min, max 60) that \
              auto-reverts. When you enable write mode or perform a write, say so to the user. \

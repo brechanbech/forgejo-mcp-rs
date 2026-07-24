@@ -293,6 +293,17 @@ impl Forge {
             .await
     }
 
+    /// `PATCH /repos/{owner}/{repo}` — edit repository settings. The body is a partial
+    /// `EditRepoOption`; only the fields present change.
+    pub async fn edit_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.0.patch(&format!("repos/{owner}/{repo}"), body).await
+    }
+
     /// `DELETE /repos/{owner}/{repo}` — delete a repository.
     pub async fn delete_repo(&self, owner: &str, repo: &str) -> Result<(), ForgeError> {
         self.0.delete(&format!("repos/{owner}/{repo}")).await

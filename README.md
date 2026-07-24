@@ -9,8 +9,8 @@ repositories, issues, and pull requests — over the Forgejo REST API.
 
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
 > the forge — user, repos, issues, pull requests, search, orgs, notifications, comments,
-> reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `create_branch`,
-> `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`, push-mirror
+> reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `edit_repo`,
+> `create_branch`, `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`, push-mirror
 > management, and `dispatch_workflow`) gated behind a separate write token and a deliberate,
 > time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
@@ -75,7 +75,7 @@ reusing the write token for reads.
 
 ### Write mode
 
-The server is **read-only by default.** `create_repo` / `delete_repo` work only when (a)
+The server is **read-only by default.** `create_repo` / `edit_repo` / `delete_repo` work only when (a)
 `FORGEJO_TOKEN_WRITE` is configured **and** (b) you've deliberately entered **write mode** via
 `enable_write_mode` — a time-boxed elevation (default 10 min, max 60) that slides forward on
 each write and auto-reverts. `write_status` reports the state; `delete_repo` also requires a
@@ -129,6 +129,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
 | `create_repo` | **write** | Create a repo (defaults to private) |
+| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, issues/PRs/wiki toggles, archive. Only provided fields change; no renames |
 | `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
 | `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
 | `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |

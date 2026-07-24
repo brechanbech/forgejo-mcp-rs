@@ -213,6 +213,19 @@ impl RestClient {
             .unwrap_or(Value::Null))
     }
 
+    /// `PATCH` of a JSON body returning the updated resource. Only the fields present in
+    /// `body` change server-side, so callers send exactly what they mean to edit.
+    ///
+    /// # Errors
+    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures.
+    pub async fn patch(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
+        Ok(self
+            .request(Method::PATCH, path, &[], Some(body))
+            .await?
+            .0
+            .unwrap_or(Value::Null))
+    }
+
     /// `POST` with no body, discarding any (typically empty) response — for sync-style endpoints.
     ///
     /// # Errors

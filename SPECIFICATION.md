@@ -192,9 +192,10 @@ Require `FORGEJO_TOKEN_WRITE` + active write mode (see the security model).
 | `comment_on_issue` | **done** | Comment on an issue/PR (`owner/repo/index/body`). |
 | `delete_repo` | **done** | Delete a repo (guarded by an exact `owner/repo` `confirm`). |
 
-**Deferred:** `edit_repo` (rename/visibility/archive) — `EditRepoOption` has 20+ no-`Default`
-fields and Codeberg renames are unreliable; not yet needed. `comment_on_issue` and other
-issue/PR writes are also future work.
+**Deferred:** `edit_repo` was deferred here through v0.14 ("`EditRepoOption` has 20+
+no-`Default` fields and Codeberg renames are unreliable") and landed in v0.15 — the first
+concern dissolved because the tool builds a partial `PATCH` body from only the provided
+fields; the second stands, so renaming is still not exposed. See the v0.15 section below.
 
 (The per-version tables above cover the original v0.1/v0.2 surface; the intervening tools —
 `create_branch`, `create_pull_request`, `list_pull_request_reviews`, and the push-mirror set —
@@ -246,6 +247,18 @@ must-differ rule for Woodpecker (letting one token back both read and write) is 
 refinement. Note also that Codeberg **hosts** a public Woodpecker at `ci.codeberg.org` (its
 recommended CI), so for Codeberg repos `WOODPECKER_URL` is `https://ci.codeberg.org`, not a
 self-hosted instance.
+
+### v0.15 — `edit_repo`
+
+| Tool | Status | Purpose |
+|---|---|---|
+| `edit_repo` | **done** | Write-mode. `PATCH /repos/{owner}/{repo}` with a partial `EditRepoOption`: visibility (`private`), `description`, `website`, `default_branch`, `has_issues`/`has_pull_requests`/`has_wiki`, `archived`. |
+
+Only the fields the caller provides are sent, so everything else keeps its current value; a
+call with nothing to change is refused with `invalid_params` rather than issuing a no-op
+`PATCH`. Renaming (`name`) is deliberately not exposed — Codeberg renames are unreliable
+(the original reason this tool was deferred). The motivating use case: flipping a repo
+created private (the `create_repo` default) to public without leaving the MCP session.
 
 ## Error handling
 

@@ -755,6 +755,43 @@ pub struct CreateRepoParams {
     pub description: Option<String>,
 }
 
+/// Parameters for the `edit_repo` tool.
+///
+/// Every settings field is optional; only the ones provided are sent in the `PATCH`,
+/// so everything else keeps its current value. Renaming is deliberately not exposed
+/// (Codeberg renames are unreliable; see SPECIFICATION.md).
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct EditRepoParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Change visibility: `true` = private, `false` = public.
+    #[serde(default)]
+    pub private: Option<bool>,
+    /// New description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// New website URL.
+    #[serde(default)]
+    pub website: Option<String>,
+    /// New default branch (must already exist).
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    /// Enable or disable the issue tracker.
+    #[serde(default)]
+    pub has_issues: Option<bool>,
+    /// Enable or disable pull requests.
+    #[serde(default)]
+    pub has_pull_requests: Option<bool>,
+    /// Enable or disable the wiki.
+    #[serde(default)]
+    pub has_wiki: Option<bool>,
+    /// Archive (`true`) or unarchive (`false`) the repository.
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
 /// Parameters for the `delete_repo` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct DeleteRepoParams {
@@ -785,6 +822,45 @@ pub async fn create_repo(
         .await
         .map_err(to_mcp)?;
     json_result(&repo)
+}
+
+/// The `PATCH` body for `edit_repo`: exactly the fields the caller set, nothing else.
+fn edit_repo_body(params: EditRepoParams) -> serde_json::Map<String, Value> {
+    let fields = [
+        ("private", params.private.map(Value::Bool)),
+        ("description", params.description.map(Value::String)),
+        ("website", params.website.map(Value::String)),
+        ("default_branch", params.default_branch.map(Value::String)),
+        ("has_issues", params.has_issues.map(Value::Bool)),
+        (
+            "has_pull_requests",
+            params.has_pull_requests.map(Value::Bool),
+        ),
+        ("has_wiki", params.has_wiki.map(Value::Bool)),
+        ("archived", params.archived.map(Value::Bool)),
+    ];
+    fields
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|v| (key.to_owned(), v)))
+        .collect()
+}
+
+/// Edits repository settings; refuses a no-op call with nothing to change.
+pub async fn edit_repo(forge: &Forge, params: EditRepoParams) -> Result<CallToolResult, McpError> {
+    let (owner, repo) = (params.owner.clone(), params.repo.clone());
+    let body = edit_repo_body(params);
+    if body.is_empty() {
+        return Err(McpError::invalid_params(
+            "edit refused: provide at least one field to change (private, description, website, \
+             default_branch, has_issues, has_pull_requests, has_wiki, archived)",
+            None,
+        ));
+    }
+    let updated = forge
+        .edit_repo(&owner, &repo, &Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&updated)
 }
 
 /// Deletes a repository — guarded by an exact `owner/repo` confirmation.
@@ -1242,6 +1318,44 @@ pub async fn dispatch_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_repo_body_contains_exactly_the_set_fields() {
+        let params = EditRepoParams {
+            owner: "brechanbech".to_owned(),
+            repo: "rpn42s-mcp-rs".to_owned(),
+            private: Some(false),
+            description: None,
+            website: None,
+            default_branch: Some("main".to_owned()),
+            has_issues: None,
+            has_pull_requests: None,
+            has_wiki: None,
+            archived: None,
+        };
+        let body = edit_repo_body(params);
+        assert_eq!(
+            Value::Object(body),
+            serde_json::json!({ "private": false, "default_branch": "main" })
+        );
+    }
+
+    #[test]
+    fn edit_repo_body_is_empty_when_nothing_is_set() {
+        let params = EditRepoParams {
+            owner: "o".to_owned(),
+            repo: "r".to_owned(),
+            private: None,
+            description: None,
+            website: None,
+            default_branch: None,
+            has_issues: None,
+            has_pull_requests: None,
+            has_wiki: None,
+            archived: None,
+        };
+        assert!(edit_repo_body(params).is_empty());
+    }
 
     #[test]
     fn slim_repos_keeps_summary_fields_and_drops_the_rest() {
