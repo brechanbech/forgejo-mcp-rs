@@ -88,6 +88,34 @@ each write and auto-reverts. `write_status` reports the state; `delete_repo` als
 `confirm` argument equal to `"owner/repo"`. See [`SPECIFICATION.md`](SPECIFICATION.md#write-mode-deliberate-time-boxed-elevation)
 for the full design.
 
+### Migration source token (optional)
+
+Only needed if you'll use [`migrate_repo`](#moving-a-repo-between-instances) against a
+**private** source. Public sources need no credential — skip this entirely.
+
+Note the direction: every other variable here authenticates to *your* instance
+(`FORGEJO_URL`). `FORGEJO_MIGRATE_TOKEN` authenticates to a **different** instance — the one
+you're copying *from*.
+
+1. Mint a token on the **source** instance (its Settings → Applications), not on your own.
+2. Give it **read scopes only** — `read:repository`, plus `read:issue` if you're migrating
+   issues and PRs. It never needs write: the migration only reads from the source.
+3. Set it as `FORGEJO_MIGRATE_TOKEN` in the same `env` block as your other tokens.
+4. Call `migrate_repo` with `auth_username` set (or `authenticate: true` for token-only
+   forges like GitHub). Without one of those the token is not sent at all.
+
+> **Understand where this token goes before you set it.** Your read/write tokens travel as an
+> `Authorization` header to `FORGEJO_URL` and nowhere else. This one is different: it goes in
+> the *request body*, and your destination instance then presents it to the source host on your
+> behalf. The destination sees it in cleartext. That's inherent to any server-side migration
+> API, not a choice this server makes — but it means you're extending trust to the destination
+> operator. Scope the token to the single repository if your source supports it, and revoke it
+> once the migration lands.
+>
+> With `mirror: true` the destination must retain the credential to keep re-fetching, so it
+> will persist in that instance's database rather than being used once and discarded. Prefer a
+> one-shot migration unless you actually want an ongoing pull mirror.
+
 ### Wire it into Claude Code
 
 ```sh
@@ -95,6 +123,7 @@ claude mcp add --scope user forgejo /path/to/target/release/forgejo-mcp-rs \
   --env FORGEJO_URL=https://codeberg.org \
   --env FORGEJO_TOKEN_READ_ONLY=your_read_token_here
 # add --env FORGEJO_TOKEN_WRITE=… only if you want the (gated) write tools
+# add --env FORGEJO_MIGRATE_TOKEN=… only to migrate from a *private* source instance
 ```
 
 ### Or Claude Desktop
@@ -178,7 +207,9 @@ source, instead of taking a one-shot copy.
 
 For a private source, set `auth_username` (or `authenticate: true` for token-only forges) and the
 server sends `FORGEJO_MIGRATE_TOKEN` as the credential. As with push mirrors, the token is never
-a tool argument, so it stays out of the conversation.
+a tool argument, so it stays out of the conversation. See
+[Migration source token](#migration-source-token-optional) for how to mint and scope it — and
+for where it ends up, which is not where the other tokens go.
 
 ## Woodpecker server (`woodpecker-mcp`)
 
@@ -247,6 +278,13 @@ holds it in a zeroized buffer and marks the `Authorization` header sensitive). R
 default, so the server cannot modify your account without a separate write token and write mode.
 Tool output is untrusted, repo-derived text — the server flags it as data, not instructions.
 See [`SPECIFICATION.md`](SPECIFICATION.md#security-model).
+
+The two *remote* credentials — `FORGEJO_MIRROR_TOKEN` and `FORGEJO_MIGRATE_TOKEN` — get the same
+in-process handling (environment only, zeroized, never a tool argument, never returned), but they
+are not header credentials and so do not stay between you and your own instance: each is sent to
+your instance in a request body and relayed onward to a third-party host, which sees it in
+cleartext. That is how Forgejo's mirror and migration APIs work, not a choice this server makes.
+Scope both narrowly and treat them as disclosed to the remote operator.
 
 ## Quality checks
 
