@@ -94,6 +94,13 @@ write token could technically read — and the read token **must differ** from
 token's *scope* without probing, so this is a structural guard (presence + distinctness), not
 a scope check.
 
+**No Forgejo version is pinned.** `FORGEJO_URL` points at any Forgejo instance — Codeberg is
+only the default, not an assumption — and the client targets the documented REST API rather
+than a specific release. Where a version *does* matter it is called out inline (the Forgejo 15
+token-scoping tightening, the Actions-runs endpoints); the `version` tool reports whatever the
+connected instance is running, which is the reliable way to check rather than trusting a
+version named in these docs.
+
 The **Woodpecker server** (`woodpecker-mcp`) takes the analogous variables — same read/write
 discipline, different names:
 
@@ -220,7 +227,7 @@ landed across v0.3–v0.11 and are listed in the README's current tool table rat
 `list_workflow_runs` unwraps the endpoint's `{ workflow_runs, total_count }` body (no
 `X-Total-Count` header), so it does not auto-paginate. A `404` from these endpoints means the
 repo has the Actions unit disabled, not that there are no runs. Verified end-to-end against a
-live dispatched run on Codeberg's Forgejo 15.
+live dispatched run on Codeberg, then running Forgejo 15.
 
 ### v0.13 — the `woodpecker-mcp` companion server
 
@@ -334,8 +341,9 @@ loose parsing wouldn't choke on it, but there was still no useful status to retu
 
 The earlier belief that the Actions-runs endpoints themselves 404 on Codeberg was **wrong** —
 they 404 only when a repo has the Actions unit *disabled*, not because Forgejo lacks them.
-Codeberg's Forgejo 15 exposes `/actions/runs`, `/actions/runs/{id}`, and
-`/actions/workflows/{file}/dispatches`, verified live against the real API. So as of **v0.12.0**
+Forgejo exposes `/actions/runs`, `/actions/runs/{id}`, and
+`/actions/workflows/{file}/dispatches`, verified live against the real API (on Codeberg's
+Forgejo 15 at the time). So as of **v0.12.0**
 the server has proper CI tooling: `list_workflow_runs` (a run's pass/fail is its `status` field —
 there is no separate `conclusion`) and `get_workflow_run` (read), plus `dispatch_workflow`
 (write-mode, keyed by workflow file name since there is no list-workflows API). Residual gap:
