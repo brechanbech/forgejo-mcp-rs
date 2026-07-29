@@ -301,6 +301,42 @@ the fully stateless path (no `initialize` at all, just per-request `_meta`), whe
 `server/discover` returns all five supported versions and `tools/list` carries
 `resultType: "complete"` alongside the cache hints.
 
+### v0.17 — `migrate_repo`
+
+| Tool | Status | Purpose |
+|---|---|---|
+| `migrate_repo` | **done** | Write-mode. `POST /repos/migrate` with a `MigrateRepoOptions`: copy a repository from another forge/instance into this one, optionally carrying issues, PRs, labels, milestones, releases, wiki and LFS. |
+
+This closes the one real gap left by the push-mirror set: mirrors replicate git refs and
+nothing else, so until now there was no way to move a repo's *metadata* between instances.
+`/repos/migrate` is called on the destination, with `clone_addr` naming the source — the
+inverse direction from a push mirror.
+
+Design notes:
+
+- **`service` gates the metadata.** It defaults to `git` (a bare clone, refs only); the
+  API-based importer that the content flags depend on only engages for a named forge. The
+  value for a Forgejo or Codeberg source is `gitea` — there is no `forgejo` variant, a
+  plausible enough mistake that unknown services are rejected up front with the valid list
+  rather than passed through to a confusing upstream 422.
+- **Content flags stay opt-in**, matching the API's own defaults, rather than being switched
+  on for the caller. `private` is the one place we override the API: it defaults to `true`,
+  as in `create_repo`, since publishing later is easier than un-publishing.
+- **`clone_addr` is validated as http(s).** An ssh or `git://` address, or a bare path, is
+  refused locally — a path in particular would otherwise be read as a *local disk* path by
+  the instance.
+- **Asynchronous by nature.** The response is a placeholder repo while the import runs in
+  Forgejo's task queue; the tool description tells the caller to poll `get_repo`. And it is a
+  copy — the source is never touched, so retiring it stays a separate, deliberate act.
+
+**Credential.** `FORGEJO_MIGRATE_TOKEN` follows `FORGEJO_MIRROR_TOKEN`'s pattern — server
+environment, `Zeroizing`, never a tool argument — but is deliberately a *separate* variable
+rather than a reuse of it. The mirror token authenticates to a push **target**; this one
+authenticates to a source being **read from**, and they are generally different hosts. One
+shared variable would mean a credential issued for host A being sent to host B on the caller's
+say-so. Authentication is opt-in (`auth_username`, or `authenticate` alone for token-only
+forges), since the common case — a public source — needs no credential at all.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:

@@ -241,6 +241,16 @@ impl Forge {
         self.0.post("user/repos", body).await
     }
 
+    /// `POST /repos/migrate` — copy a repository from another forge into this instance. The
+    /// body is a `MigrateRepoOptions`; the response is the new `Repository`.
+    ///
+    /// The import runs asynchronously in Forgejo's task queue, so the returned repo is a
+    /// placeholder that fills in over the following seconds or minutes — poll `get_repo` to
+    /// watch it land. The source repository is never modified: this is a copy, not a move.
+    pub async fn migrate_repo(&self, body: &Value) -> Result<Value, ForgeError> {
+        self.0.post("repos/migrate", body).await
+    }
+
     /// `POST /repos/{owner}/{repo}/issues` — create an issue.
     pub async fn create_issue(
         &self,

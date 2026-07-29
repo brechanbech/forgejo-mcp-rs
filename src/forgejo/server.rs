@@ -45,6 +45,11 @@ pub struct ForgejoMcp {
     /// `FORGEJO_MIRROR_TOKEN`. Behind `Arc` so handler clones share one copy; zeroized on drop.
     /// Sent only as the `remote_password` when adding a push mirror — never returned or logged.
     mirror_token: Option<Arc<Zeroizing<String>>>,
+    /// Optional credential for the *source* instance of a migration, from
+    /// `FORGEJO_MIGRATE_TOKEN`. Deliberately separate from `mirror_token`: that one authenticates
+    /// to a push target, this one to a repo being read from, and they are usually different hosts
+    /// — sharing one variable would send a credential to a host it was never issued for.
+    migrate_token: Option<Arc<Zeroizing<String>>>,
 }
 
 impl std::fmt::Debug for ForgejoMcp {
@@ -104,17 +109,30 @@ impl ForgejoMcp {
             .filter(|s| !s.is_empty())
             .map(|t| Arc::new(Zeroizing::new(t)));
 
+        // Optional migration-source credential — again independent of every other token, and
+        // kept apart from the mirror one because it is sent to a different host.
+        let migrate_token = std::env::var("FORGEJO_MIGRATE_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|t| Arc::new(Zeroizing::new(t)));
+
         Ok(Self {
             tool_router: Self::tool_router(),
             forgejo: Arc::new(forgejo),
             elevation: Arc::new(elevation),
             mirror_token,
+            migrate_token,
         })
     }
 
     /// The configured push-mirror credential, if any (`FORGEJO_MIRROR_TOKEN`).
     fn mirror_token(&self) -> Option<&str> {
         self.mirror_token.as_ref().map(|t| t.as_str())
+    }
+
+    /// The configured migration-source credential, if any (`FORGEJO_MIGRATE_TOKEN`).
+    fn migrate_token(&self) -> Option<&str> {
+        self.migrate_token.as_ref().map(|t| t.as_str())
     }
 
     /// The write client, gated on active write mode (delegates to [`Elevation::client`]).
@@ -386,6 +404,21 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    /// Migrates a repository from another forge into this instance.
+    #[tool(
+        description = "Migrate (copy) a repository from ANOTHER forge/instance into this one — the only way to move issues and PRs across instances, unlike push mirrors which carry git refs only. Give clone_addr (http/https URL on the source) and repo_name. Set service to the source forge (\"gitea\" for Forgejo; the default \"git\" copies refs only) and turn on issues/pull_requests/labels/milestones/releases/wiki, which all default to false. The import is ASYNCHRONOUS: the repo comes back immediately and fills in over the following seconds or minutes, so poll get_repo to confirm. This copies — the source repo is left untouched. Requires write mode. For a private source, the credential comes from the server's FORGEJO_MIGRATE_TOKEN env var — never pass it as an argument; set auth_username or authenticate=true to use it."
+    )]
+    async fn migrate_repo(
+        &self,
+        Parameters(params): Parameters<tools::MigrateRepoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::migrate_repo(client, self.migrate_token(), params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
     /// Creates an issue in a repository.
     #[tool(
         description = "Create an issue in a repository (owner/repo/title, optional body; requires write mode)"
@@ -564,6 +597,10 @@ impl ServerHandler for ForgejoMcp {
              Push-mirror tools (add/list/delete/sync_push_mirrors) also require write mode; \
              add_push_mirror reads the remote push credential from the server's \
              FORGEJO_MIRROR_TOKEN env var (or use_ssh=true) — never pass a token as an argument. \
+             migrate_repo copies a repo in from ANOTHER instance and is the only tool that can \
+             carry issues/PRs across instances (push mirrors are git-only); it requires write \
+             mode, runs asynchronously (poll get_repo), leaves the source untouched, and takes \
+             any source credential from FORGEJO_MIGRATE_TOKEN — again never as an argument. \
              Forgejo Actions (CI): list_workflow_runs and get_workflow_run are read-only (a run's \
              outcome is its `status` field — there is no separate conclusion). dispatch_workflow \
              triggers a workflow_dispatch run and requires write mode; it is keyed by workflow \
@@ -593,7 +630,7 @@ mod tests {
 
     /// A server with dummy clients (no network is touched by the logic under test). The
     /// write-mode gating itself is tested in `crate::mcp_core::Elevation`; here we only cover the
-    /// forge-specific mirror-token plumbing.
+    /// forge-specific credential plumbing.
     fn server(with_write: bool) -> ForgejoMcp {
         let url = Url::parse("https://codeberg.org").unwrap();
         let read = Arc::new(Forge::new(&url, "ro").unwrap());
@@ -608,6 +645,7 @@ mod tests {
                 "FORGEJO_TOKEN_WRITE",
             )),
             mirror_token: None,
+            migrate_token: None,
         }
     }
 
@@ -617,5 +655,30 @@ mod tests {
         assert!(s.mirror_token().is_none(), "unset -> None");
         s.mirror_token = Some(Arc::new(zeroize::Zeroizing::new("ghp_x".to_owned())));
         assert_eq!(s.mirror_token(), Some("ghp_x"));
+    }
+
+    #[test]
+    fn migrate_token_is_exposed_when_set() {
+        let mut s = server(true);
+        assert!(s.migrate_token().is_none(), "unset -> None");
+        s.migrate_token = Some(Arc::new(zeroize::Zeroizing::new("src_tok".to_owned())));
+        assert_eq!(s.migrate_token(), Some("src_tok"));
+    }
+
+    /// The two credentials go to different hosts, so setting one must never leak into the other.
+    #[test]
+    fn mirror_and_migrate_tokens_stay_separate() {
+        let mut s = server(true);
+        s.mirror_token = Some(Arc::new(zeroize::Zeroizing::new("ghp_x".to_owned())));
+        assert!(
+            s.migrate_token().is_none(),
+            "mirror token must not stand in"
+        );
+        s.mirror_token = None;
+        s.migrate_token = Some(Arc::new(zeroize::Zeroizing::new("src_tok".to_owned())));
+        assert!(
+            s.mirror_token().is_none(),
+            "migrate token must not stand in"
+        );
     }
 }

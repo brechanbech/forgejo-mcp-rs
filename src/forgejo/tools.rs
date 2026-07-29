@@ -803,6 +803,90 @@ pub struct DeleteRepoParams {
     pub confirm: String,
 }
 
+/// Source forges Forgejo's migration importer understands. `git` is a bare clone (refs only);
+/// every other value unlocks the API-based importer that can carry issues, PRs and releases.
+/// Use `gitea` for a Forgejo or Gitea source — there is no separate `forgejo` value.
+const MIGRATE_SERVICES: [&str; 8] = [
+    "git",
+    "github",
+    "gitea",
+    "gitlab",
+    "gogs",
+    "onedev",
+    "gitbucket",
+    "codebase",
+];
+
+/// Parameters for the `migrate_repo` tool.
+///
+/// Mirrors Forgejo's `MigrateRepoOptions`, minus the credential: the source password/token is
+/// supplied by the server via `FORGEJO_MIGRATE_TOKEN`, never as a tool argument.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct MigrateRepoParams {
+    /// Source clone URL on the *other* instance, e.g.
+    /// `https://codeberg.org/owner/repo.git`. Must be `http://` or `https://`.
+    pub clone_addr: String,
+    /// Name for the new repository on this instance.
+    pub repo_name: String,
+    /// User or organisation that will own the new repo. Defaults to the authenticated user.
+    #[serde(default)]
+    pub repo_owner: Option<String>,
+    /// Source forge type: `git`, `github`, `gitea` (use this for Forgejo), `gitlab`, `gogs`,
+    /// `onedev`, `gitbucket`, `codebase`. Defaults to `git`, which copies git refs only —
+    /// name the real forge to carry issues, PRs and releases across.
+    #[serde(default)]
+    pub service: Option<String>,
+    /// Description for the new repository.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Visibility of the new repository. Defaults to private.
+    #[serde(default)]
+    pub private: Option<bool>,
+    /// Username on the *source* instance. Setting it turns on authentication (the token comes
+    /// from the server's `FORGEJO_MIGRATE_TOKEN`). Leave unset for a public source, or when the
+    /// source authenticates by bare token — then set `authenticate = true` instead.
+    #[serde(default)]
+    pub auth_username: Option<String>,
+    /// Send the server's `FORGEJO_MIGRATE_TOKEN` as the source credential. Implied when
+    /// `auth_username` is set. Needed on its own for token-only auth, and for private
+    /// GitHub/GitLab sources.
+    #[serde(default)]
+    pub authenticate: Option<bool>,
+    /// Also migrate issues. Requires a non-`git` `service`. Defaults to false.
+    #[serde(default)]
+    pub issues: Option<bool>,
+    /// Also migrate pull requests. Requires a non-`git` `service`. Defaults to false.
+    #[serde(default)]
+    pub pull_requests: Option<bool>,
+    /// Also migrate labels. Requires a non-`git` `service`. Defaults to false.
+    #[serde(default)]
+    pub labels: Option<bool>,
+    /// Also migrate milestones. Requires a non-`git` `service`. Defaults to false.
+    #[serde(default)]
+    pub milestones: Option<bool>,
+    /// Also migrate releases (and their attachments). Requires a non-`git` `service`.
+    /// Defaults to false.
+    #[serde(default)]
+    pub releases: Option<bool>,
+    /// Also migrate the wiki. Defaults to false.
+    #[serde(default)]
+    pub wiki: Option<bool>,
+    /// Also fetch Git LFS objects. Defaults to false.
+    #[serde(default)]
+    pub lfs: Option<bool>,
+    /// Custom LFS endpoint, if the source doesn't serve LFS from the clone URL.
+    #[serde(default)]
+    pub lfs_endpoint: Option<String>,
+    /// Keep the new repo as a *pull* mirror that periodically re-fetches from the source,
+    /// instead of taking a one-shot copy. Defaults to false.
+    #[serde(default)]
+    pub mirror: Option<bool>,
+    /// Pull-mirror refresh interval in Forgejo duration form (e.g. `8h0m0s`). Only meaningful
+    /// with `mirror = true`.
+    #[serde(default)]
+    pub mirror_interval: Option<String>,
+}
+
 /// Creates a repository for the authenticated user (defaults to private).
 pub async fn create_repo(
     forge: &Forge,
@@ -880,6 +964,124 @@ pub async fn delete_repo(
         .await
         .map_err(to_mcp)?;
     json_result(&serde_json::json!({ "deleted": expected }))
+}
+
+/// Builds the `MigrateRepoOptions` body, validating the caller's input and splicing in the
+/// server-held source credential. Split out from [`migrate_repo`] so the argument handling —
+/// especially the credential rules — is unit-testable without a live instance.
+fn migrate_repo_body(
+    params: MigrateRepoParams,
+    migrate_token: Option<&str>,
+) -> Result<serde_json::Map<String, Value>, McpError> {
+    // An http(s) clone address is what the migration API expects; anything else (ssh, git://,
+    // a local path) is either rejected downstream or, worse, quietly treated as a local disk
+    // path by the instance. Fail loudly here instead.
+    let addr = params.clone_addr.trim();
+    if !(addr.starts_with("https://") || addr.starts_with("http://")) {
+        return Err(McpError::invalid_params(
+            format!(
+                "migrate refused: clone_addr must be an http:// or https:// URL, got \"{addr}\""
+            ),
+            None,
+        ));
+    }
+    if params.repo_name.trim().is_empty() {
+        return Err(McpError::invalid_params(
+            "migrate refused: repo_name must not be empty".to_owned(),
+            None,
+        ));
+    }
+    if let Some(service) = params.service.as_deref()
+        && !MIGRATE_SERVICES.contains(&service)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "migrate refused: unknown service \"{service}\" — expected one of {} (use \
+                 \"gitea\" for a Forgejo source)",
+                MIGRATE_SERVICES.join(", ")
+            ),
+            None,
+        ));
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("clone_addr".to_owned(), Value::String(addr.to_owned()));
+    body.insert("repo_name".to_owned(), Value::String(params.repo_name));
+    // Default to private, matching create_repo: a migrated repo is easier to publish later than
+    // to un-publish.
+    body.insert(
+        "private".to_owned(),
+        Value::Bool(params.private.unwrap_or(true)),
+    );
+
+    let optional_strings = [
+        ("repo_owner", params.repo_owner),
+        ("service", params.service),
+        ("description", params.description),
+        ("lfs_endpoint", params.lfs_endpoint),
+        ("mirror_interval", params.mirror_interval),
+    ];
+    for (key, value) in optional_strings {
+        if let Some(v) = value {
+            body.insert(key.to_owned(), Value::String(v));
+        }
+    }
+
+    let optional_flags = [
+        ("issues", params.issues),
+        ("pull_requests", params.pull_requests),
+        ("labels", params.labels),
+        ("milestones", params.milestones),
+        ("releases", params.releases),
+        ("wiki", params.wiki),
+        ("lfs", params.lfs),
+        ("mirror", params.mirror),
+    ];
+    for (key, value) in optional_flags {
+        if let Some(v) = value {
+            body.insert(key.to_owned(), Value::Bool(v));
+        }
+    }
+
+    // Authentication is opt-in: most migrations read a public source and need no credential at
+    // all. Naming a username implies it; `authenticate` alone covers token-only forges.
+    let wants_auth = params.authenticate.unwrap_or(false) || params.auth_username.is_some();
+    if wants_auth {
+        let token = migrate_token.ok_or_else(|| {
+            McpError::invalid_params(
+                "no source credential configured: set FORGEJO_MIGRATE_TOKEN on the server to a \
+                 token for the *source* instance, or drop auth_username/authenticate if the \
+                 source repository is public"
+                    .to_owned(),
+                None,
+            )
+        })?;
+        if let Some(username) = params.auth_username {
+            body.insert("auth_username".to_owned(), Value::String(username));
+        }
+        body.insert("auth_token".to_owned(), Value::String(token.to_owned()));
+    }
+
+    Ok(body)
+}
+
+/// Migrates (copies) a repository from another forge into this instance, optionally bringing
+/// issues, PRs, labels, milestones, releases and the wiki with it.
+///
+/// The source credential is supplied by the server via `FORGEJO_MIGRATE_TOKEN`
+/// (`migrate_token`), never as a tool argument, so it stays out of the conversation.
+pub async fn migrate_repo(
+    forge: &Forge,
+    migrate_token: Option<&str>,
+    params: MigrateRepoParams,
+) -> Result<CallToolResult, McpError> {
+    let body = migrate_repo_body(params, migrate_token)?;
+    // The Repository response carries no credential — safe to return verbatim.
+    let repo = forge
+        .migrate_repo(&Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&repo)
 }
 
 /// Parameters for the `create_issue` tool.
@@ -1355,6 +1557,104 @@ mod tests {
             archived: None,
         };
         assert!(edit_repo_body(params).is_empty());
+    }
+
+    /// A minimal, valid set of migrate params; tests tweak the fields they care about.
+    fn migrate_params(clone_addr: &str) -> MigrateRepoParams {
+        MigrateRepoParams {
+            clone_addr: clone_addr.to_owned(),
+            repo_name: "repo".to_owned(),
+            repo_owner: None,
+            service: None,
+            description: None,
+            private: None,
+            auth_username: None,
+            authenticate: None,
+            issues: None,
+            pull_requests: None,
+            labels: None,
+            milestones: None,
+            releases: None,
+            wiki: None,
+            lfs: None,
+            lfs_endpoint: None,
+            mirror: None,
+            mirror_interval: None,
+        }
+    }
+
+    #[test]
+    fn migrate_repo_body_sends_only_set_fields_and_defaults_to_private() {
+        let mut params = migrate_params("https://codeberg.org/brechanbech/sec-mcp.git");
+        params.service = Some("gitea".to_owned());
+        params.issues = Some(true);
+        params.wiki = Some(false);
+        let body = migrate_repo_body(params, None).unwrap();
+        assert_eq!(
+            Value::Object(body),
+            serde_json::json!({
+                "clone_addr": "https://codeberg.org/brechanbech/sec-mcp.git",
+                "repo_name": "repo",
+                "private": true,
+                "service": "gitea",
+                "issues": true,
+                "wiki": false,
+            })
+        );
+    }
+
+    #[test]
+    fn migrate_repo_body_rejects_a_non_http_clone_addr() {
+        for addr in [
+            "git@codeberg.org:o/r.git",
+            "git://host/r.git",
+            "/etc/passwd",
+        ] {
+            assert!(
+                migrate_repo_body(migrate_params(addr), None).is_err(),
+                "{addr} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_repo_body_rejects_an_unknown_service() {
+        let mut params = migrate_params("https://example.com/o/r.git");
+        // A plausible-looking mistake: there is no "forgejo" service, it's "gitea".
+        params.service = Some("forgejo".to_owned());
+        assert!(migrate_repo_body(params, None).is_err());
+    }
+
+    #[test]
+    fn migrate_repo_body_omits_credentials_unless_auth_is_requested() {
+        let body =
+            migrate_repo_body(migrate_params("https://example.com/o/r.git"), Some("tok")).unwrap();
+        assert!(body.get("auth_token").is_none(), "public source: no token");
+        assert!(body.get("auth_username").is_none());
+    }
+
+    #[test]
+    fn migrate_repo_body_splices_in_the_server_token_when_auth_is_requested() {
+        // A username implies authentication...
+        let mut params = migrate_params("https://example.com/o/r.git");
+        params.auth_username = Some("brechanbech".to_owned());
+        let body = migrate_repo_body(params, Some("tok")).unwrap();
+        assert_eq!(body["auth_username"], "brechanbech");
+        assert_eq!(body["auth_token"], "tok");
+
+        // ...and so does `authenticate` alone, for token-only forges.
+        let mut params = migrate_params("https://example.com/o/r.git");
+        params.authenticate = Some(true);
+        let body = migrate_repo_body(params, Some("tok")).unwrap();
+        assert_eq!(body["auth_token"], "tok");
+        assert!(body.get("auth_username").is_none());
+    }
+
+    #[test]
+    fn migrate_repo_body_fails_when_auth_is_requested_without_a_configured_token() {
+        let mut params = migrate_params("https://example.com/o/r.git");
+        params.auth_username = Some("brechanbech".to_owned());
+        assert!(migrate_repo_body(params, None).is_err());
     }
 
     #[test]

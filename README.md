@@ -10,7 +10,8 @@ repositories, issues, and pull requests — over the Forgejo REST API.
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
 > the forge — user, repos, issues, pull requests, search, orgs, notifications, comments,
 > reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `edit_repo`,
-> `create_branch`, `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`, push-mirror
+> `create_branch`, `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`,
+> `migrate_repo`, push-mirror
 > management, and `dispatch_workflow`) gated behind a separate write token and a deliberate,
 > time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
@@ -61,6 +62,7 @@ The server is configured by environment variables:
 | `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Providing it enables the write tools**; omit it for a pure read-only server. |
 | `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
 | `FORGEJO_MIRROR_TOKEN` | no | — | Credential `add_push_mirror` sends as the remote's password (e.g. a GitHub PAT). Kept out of the conversation — never passed as a tool argument. Omit if you only use `use_ssh=true` mirrors. |
+| `FORGEJO_MIGRATE_TOKEN` | no | — | Credential `migrate_repo` sends to the **source** instance it reads from. Also never passed as a tool argument. Kept separate from `FORGEJO_MIRROR_TOKEN` on purpose — that one authenticates to a push *target*, so sharing a variable would send a credential to a host it was never issued for. Omit if you only migrate public repos. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 
 Mint a token at **Codeberg → Settings → Applications** (or your instance's equivalent). For
@@ -133,6 +135,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
 | `create_repo` | **write** | Create a repo (defaults to private) |
+| `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Async (poll `get_repo`); leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
 | `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, issues/PRs/wiki toggles, archive. Only provided fields change; no renames |
 | `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
 | `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
@@ -153,6 +156,29 @@ set and return a `{ returned, total, truncated, items }` envelope; pass an expli
 comment, and review results are slimmed to the fields that matter. The **write** tools require
 write mode (above); editing existing issues/PRs is future work — see the
 [specification](SPECIFICATION.md).
+
+### Moving a repo between instances
+
+`migrate_repo` wraps Forgejo's `POST /repos/migrate`, which you call on the **destination** —
+`clone_addr` points at the source. Unlike a push mirror, which replicates git refs and nothing
+else, this can bring the issues, PRs, labels, milestones, releases and wiki with it. Three
+things to know:
+
+- **Set `service`.** It defaults to `git`, a bare clone that copies refs only. Name the source
+  forge (`gitea` for a Forgejo or Codeberg source — there is no `forgejo` value) to enable the
+  API-based importer that the metadata flags depend on.
+- **The content flags default to off.** `issues`, `pull_requests`, `labels`, `milestones`,
+  `releases`, `wiki` and `lfs` are each opt-in, matching the API's own defaults.
+- **It's asynchronous, and it's a copy.** The call returns a repo record immediately while the
+  import runs in Forgejo's task queue, so poll `get_repo` to see it land. The source repository
+  is never modified — retiring it is a separate, deliberate step.
+
+Pass `mirror: true` to keep the result as a *pull* mirror that periodically re-fetches from the
+source, instead of taking a one-shot copy.
+
+For a private source, set `auth_username` (or `authenticate: true` for token-only forges) and the
+server sends `FORGEJO_MIGRATE_TOKEN` as the credential. As with push mirrors, the token is never
+a tool argument, so it stays out of the conversation.
 
 ## Woodpecker server (`woodpecker-mcp`)
 
