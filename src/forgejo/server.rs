@@ -6,12 +6,16 @@
 
 use std::sync::Arc;
 
-use crate::mcp_core::{Elevation, TokenEnv, json_result, resolve_tokens};
+use crate::mcp_core::{Elevation, TokenEnv, json_result, resolve_tokens, tool_list_result};
 use anyhow::Context as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
+    ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -363,7 +367,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::create_repo(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -378,7 +382,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::edit_repo(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -393,7 +397,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::create_issue(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -408,7 +412,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::create_branch(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -423,7 +427,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::create_pull_request(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -438,7 +442,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::comment_on_issue(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -453,7 +457,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::delete_repo(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -470,7 +474,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::add_push_mirror(client, self.mirror_token(), params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -484,7 +488,7 @@ impl ForgejoMcp {
     ) -> Result<CallToolResult, McpError> {
         let client = self.write_client()?;
         let mut result = tools::list_push_mirrors(client, params).await?;
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -499,7 +503,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::delete_push_mirror(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -514,7 +518,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::sync_push_mirrors(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -531,7 +535,7 @@ impl ForgejoMcp {
         let client = self.write_client()?;
         let mut result = tools::dispatch_workflow(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 }
@@ -539,11 +543,14 @@ impl ForgejoMcp {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ForgejoMcp {
     fn get_info(&self) -> ServerInfo {
-        // Lean on Default for protocol_version/server_info (rmcp fills these from the build
-        // env / latest supported protocol). ServerInfo is #[non_exhaustive] in rmcp 1.7, so
-        // mutate a Default rather than use a struct literal.
+        // Lean on Default for protocol_version (rmcp negotiates up to 2026-07-28 from it).
+        // ServerInfo is #[non_exhaustive], so mutate a Default rather than use a struct literal.
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        // NOT Default: `Implementation::from_build_env` expands `env!` inside rmcp, so it names
+        // the SDK ("rmcp 3.0.0") rather than this server. Clients see this in `server/discover`.
+        // The name is the binary's, not the package's — one package ships two servers.
+        info.server_info = Implementation::new("forgejo-mcp-rs", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Tools for inspecting a Forgejo/Codeberg account and its repositories (user, \
              repos, issues, pull requests, search). Configured via FORGEJO_URL and \
@@ -567,6 +574,16 @@ impl ServerHandler for ForgejoMcp {
                 .to_owned(),
         );
         info
+    }
+
+    /// Overrides the `#[tool_handler]`-generated body solely to attach the `2026-07-28` cache
+    /// hints; the tool set itself is still whatever the router holds. See [`tool_list_result`].
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(tool_list_result(self.tool_router.list_all()))
     }
 }
 

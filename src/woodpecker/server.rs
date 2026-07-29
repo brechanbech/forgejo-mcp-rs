@@ -7,12 +7,16 @@
 
 use std::sync::Arc;
 
-use crate::mcp_core::{Elevation, TokenEnv, json_result, resolve_tokens};
+use crate::mcp_core::{Elevation, TokenEnv, json_result, resolve_tokens, tool_list_result};
 use anyhow::Context as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
+    ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use url::Url;
 
 use super::client::Woodpecker;
@@ -237,7 +241,7 @@ impl WoodpeckerMcp {
         let client = self.write_client()?;
         let mut result = tools::trigger_pipeline(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -250,7 +254,7 @@ impl WoodpeckerMcp {
         let client = self.write_client()?;
         let mut result = tools::cancel_pipeline(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 
@@ -265,7 +269,7 @@ impl WoodpeckerMcp {
         let client = self.write_client()?;
         let mut result = tools::restart_pipeline(client, params).await?;
         self.extend_window();
-        result.content.push(Content::text(self.window_note()));
+        result.content.push(ContentBlock::text(self.window_note()));
         Ok(result)
     }
 }
@@ -283,6 +287,10 @@ impl ServerHandler for WoodpeckerMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        // NOT Default: `Implementation::from_build_env` expands `env!` inside rmcp, so it names
+        // the SDK ("rmcp 3.0.0") rather than this server. Clients see this in `server/discover`.
+        // The name is the binary's, not the package's — one package ships two servers.
+        info.server_info = Implementation::new("woodpecker-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Tools for inspecting and driving a Woodpecker CI instance (user, repositories, \
              pipelines). Configured via WOODPECKER_URL and a personal access token in \
@@ -299,5 +307,15 @@ impl ServerHandler for WoodpeckerMcp {
                 .to_owned(),
         );
         info
+    }
+
+    /// Overrides the `#[tool_handler]`-generated body solely to attach the `2026-07-28` cache
+    /// hints; the tool set itself is still whatever the router holds. See [`tool_list_result`].
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(tool_list_result(self.tool_router.list_all()))
     }
 }

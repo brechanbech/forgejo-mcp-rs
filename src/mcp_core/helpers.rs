@@ -7,7 +7,7 @@
 use std::pin::Pin;
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CacheScope, CallToolResult, ContentBlock, ListToolsResult, ResultType, Tool};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -54,7 +54,35 @@ pub fn into_items(value: Value) -> Vec<Value> {
 pub fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+}
+
+/// Freshness hint advertised on `tools/list`: one hour.
+///
+/// Both servers register their tool set once, at construction, and never mutate it, so the list
+/// is constant for the life of the process. An hour is long enough to stop a client re-listing
+/// on every turn, short enough that a client persisting the cache across restarts picks up an
+/// upgraded binary promptly.
+pub const TOOL_LIST_TTL_MS: u64 = 60 * 60 * 1000;
+
+/// Wraps a router's tools in a [`ListToolsResult`] carrying the SEP-2549 cache hints (`ttlMs`,
+/// `cacheScope`) that protocol version `2026-07-28` requires. Servers override `list_tools` with
+/// this instead of the `#[tool_handler]`-generated body, which leaves both fields `None`.
+///
+/// `cacheScope` is [`CacheScope::Public`]: the tool set depends only on the binary, never on the
+/// caller or its token. Write-mode elevation gates the write tools at *call* time — it never
+/// hides them from the listing — so the list does not vary with elevation state either.
+#[must_use]
+pub fn tool_list_result(tools: Vec<Tool>) -> ListToolsResult {
+    ListToolsResult {
+        // rmcp clears this when the peer negotiated a pre-2026-07-28 version.
+        result_type: Some(ResultType::COMPLETE),
+        tools,
+        meta: None,
+        next_cursor: None,
+        ttl_ms: Some(TOOL_LIST_TTL_MS),
+        cache_scope: Some(CacheScope::Public),
+    }
 }
 
 /// Wraps a page of list results with pagination metadata, so the caller can tell where it is and

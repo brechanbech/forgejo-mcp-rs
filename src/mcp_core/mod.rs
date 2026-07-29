@@ -10,6 +10,7 @@
 //! - [`Elevation`] — time-boxed, sliding write-mode elevation, generic over the write client.
 //! - result/pagination helpers: [`json_result`], [`to_mcp`], [`decode`], [`paged_result`],
 //!   [`gather_all`], …
+//! - [`tool_list_result`] — a `tools/list` result carrying the cache hints `2026-07-28` requires.
 //! - [`init_tracing`] — stderr structured logging (stdout is the MCP stdio transport).
 
 mod elevation;
@@ -24,6 +25,7 @@ pub use elevation::Elevation;
 pub use error::ApiError;
 pub use helpers::{
     decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
+    tool_list_result,
 };
 pub use rest::{Auth, RestClient, RestConfig, paging};
 pub use tokens::{TokenEnv, resolve_tokens};
