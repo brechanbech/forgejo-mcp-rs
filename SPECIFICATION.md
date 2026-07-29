@@ -66,8 +66,16 @@ woodpecker  →  Woodpecker(RestClient) + #[tool] methods  →  woodpecker-mcp b
 - `src/bin/{forgejo,woodpecker}.rs` — thin `#[tokio::main]` wrappers that call the respective
   module `serve()`. Logs go to **stderr** (stdout is the MCP stdio transport).
 
-Built on `rmcp 1.7`. Conventions (lints, CI, pre-push, deny/clippy config) mirror the
-sibling `kicad-mcp-rs` project.
+Built on `rmcp 3`, which speaks MCP protocol version **2026-07-28** and negotiates down to
+`2024-11-05`. Conventions (lints, CI, pre-push, deny/clippy config) mirror the sibling
+`kicad-mcp-rs` project.
+
+Both servers are **stdio-only and tools-only** (`ServerCapabilities::enable_tools()`), which is
+why the 2026-07-28 revision costs them so little: the removed session handshake, the
+`Mcp-Session-Id` header, SSE resumability, and `subscriptions/listen` are all Streamable-HTTP
+concerns, and every feature the revision deprecates — Roots, Sampling, Logging, HTTP+SSE,
+Dynamic Client Registration — is one neither server ever used. Logging in particular already
+follows the recommended migration: `init_tracing` writes to stderr, never `notifications/message`.
 
 ## Configuration
 
@@ -260,6 +268,32 @@ call with nothing to change is refused with `invalid_params` rather than issuing
 (the original reason this tool was deferred). The motivating use case: flipping a repo
 created private (the `create_repo` default) to public without leaving the MCP session.
 
+### v0.16 — MCP 2026-07-28 (rmcp 3)
+
+No tool changes; the tool surface is identical to v0.15. What moved:
+
+| Change | Why |
+|---|---|
+| `rmcp 1.7` → `3` | Protocol version 2026-07-28 support. `Content` was renamed `ContentBlock`; that rename is the entire mechanical cost of the migration. |
+| `list_tools` overridden in both servers | 2026-07-28 (SEP-2549) requires `ttlMs` and `cacheScope` on `tools/list`; the `#[tool_handler]`-generated body leaves both `None`. Built by `mcp_core::tool_list_result`. |
+| `server_info` set explicitly | `Implementation::from_build_env` expands `env!` inside *rmcp*, so both servers were identifying themselves as `rmcp 3.0.0`. Now `forgejo-mcp-rs` / `woodpecker-mcp` at the crate version — the name is the **binary's**, since one package ships two servers. |
+| `base64 0.22` → `0.23` | Matches rmcp's. Does **not** clear the `cargo deny` duplicate warning: `reqwest`/`hyper-util` still pin 0.22, so two versions remain in the tree until they update. |
+
+**Cache hints.** `ttlMs` is one hour and `cacheScope` is `public`. Public is safe because the
+tool set depends only on the binary, never on the caller or its token: write-mode elevation
+gates the write tools at *call* time and never hides them from the listing, so the list does
+not vary with elevation state either. Both fields are sent unconditionally rather than gated on
+the negotiated version — they are additive, and rmcp models them as optional across versions,
+so a pre-2026-07-28 client simply ignores them.
+
+**Protocol version.** `get_info` still leans on `ServerInfo::default()` for `protocol_version`,
+which is `ProtocolVersion::LATEST` — and in rmcp 3.0 that is still `2025-11-25`, not
+`2026-07-28`. This only sets the *fallback*: negotiation accepts any known version, so a
+2026-07-28 client is served 2026-07-28. Verified against both binaries over stdio, including
+the fully stateless path (no `initialize` at all, just per-request `_meta`), where
+`server/discover` returns all five supported versions and `tools/list` carries
+`resultType: "complete"` alongside the cache hints.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -340,5 +374,7 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
    `forgejo-mcp-core`), then **collapsed to one crate + two binaries** once it was clear Woodpecker
    only runs in tandem with Forgejo and crates.io is the project's only real discovery surface — one
    legible crate beats a trio with an internal helper crate on display. *(done)*
-6. Later — `edit_repo`, issue/PR writes, slimmed Woodpecker/passthrough output, sort filters, a
+6. **v0.16.0** — moved to `rmcp 3` / MCP protocol version 2026-07-28: `tools/list` cache hints
+   and correct server identity in `server/discover`. No tool changes. *(done)*
+7. Later — issue/PR writes, slimmed Woodpecker/passthrough output, sort filters, a
    Woodpecker `version`/instance tool.

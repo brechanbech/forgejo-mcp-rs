@@ -19,6 +19,10 @@ over the shared `src/mcp_core/` transport) — an **independent implementation o
 API**, not a port of any other server. There is no third-party forge SDK in the trust path, so the
 tool surface holding your token is code you can read and audit end to end.
 
+Both servers speak **MCP protocol version 2026-07-28** (since v0.16) and negotiate down to
+`2024-11-05`, so older clients keep working unchanged. They run over **stdio** and expose
+**tools only** — no resources, prompts, sampling, or roots.
+
 ## Build
 
 ```sh
@@ -147,7 +151,7 @@ set and return a `{ returned, total, truncated, items }` envelope; pass an expli
 `limit` for a single page, which returns `{ page, limit, returned, total, items }` instead
 (`total` is `null` for `search_repos`, which reports no count). Repository, notification,
 comment, and review results are slimmed to the fields that matter. The **write** tools require
-write mode (above); `edit_repo` and editing existing issues/PRs are future work — see the
+write mode (above); editing existing issues/PRs is future work — see the
 [specification](SPECIFICATION.md).
 
 ## Woodpecker server (`woodpecker-mcp`)
