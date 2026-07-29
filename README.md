@@ -301,6 +301,9 @@ CI runs the same on [Codeberg Forgejo Actions](.forgejo/workflows/ci.yml); a tra
 
 ## History
 
+Per-release changes are in [`CHANGELOG.md`](CHANGELOG.md); the design rationale behind each is
+in [`SPECIFICATION.md`](SPECIFICATION.md).
+
 Releases through v0.5 were built on the [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api)
 crate by Cyborus. `forgejo-mcp-rs` now talks to the Forgejo REST API through its own small
 client and carries no third-party forge SDK.
