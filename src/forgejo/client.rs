@@ -9,7 +9,7 @@
 //! Errors funnel through [`crate::mcp_core::ApiError`], re-exported here as [`ForgeError`] for the
 //! existing call sites.
 
-use crate::mcp_core::{Auth, RestClient, RestConfig, paging};
+use crate::mcp_core::{RestClient, RestConfig, paging};
 use serde_json::Value;
 use url::Url;
 
@@ -33,8 +33,6 @@ impl Forge {
             base_url,
             token,
             api_prefix: API_PREFIX,
-            // Forgejo/Gitea authenticate with `Authorization: token <token>`.
-            auth: Auth::Token,
             user_agent: concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")),
         })?;
         Ok(Self(client))

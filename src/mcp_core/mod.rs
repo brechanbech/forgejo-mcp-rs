@@ -1,10 +1,10 @@
-//! Shared scaffolding for the forge MCP servers.
+//! Shared scaffolding for the Forgejo MCP server.
 //!
-//! This crate holds everything the Forgejo and Woodpecker servers have in common, so each
-//! server crate is reduced to its endpoint set and tool definitions:
+//! Transport and MCP plumbing kept apart from the endpoint set and tool definitions in
+//! [`crate::forgejo`], so that module is about Forgejo and nothing else:
 //!
-//! - [`RestClient`] — a thin REST-over-`reqwest` client, parameterized by [`Auth`] scheme and
-//!   API prefix ([`RestConfig`]).
+//! - [`RestClient`] — a thin REST-over-`reqwest` client, parameterized by API prefix
+//!   ([`RestConfig`]) and presenting a `token` credential.
 //! - [`ApiError`] — the client's error type, with [`ApiError::is_caller_error`] driving MCP
 //!   error mapping.
 //! - [`Elevation`] — time-boxed, sliding write-mode elevation, generic over the write client.
@@ -27,7 +27,7 @@ pub use helpers::{
     decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
     tool_list_result,
 };
-pub use rest::{Auth, RestClient, RestConfig, paging};
+pub use rest::{RestClient, RestConfig, paging};
 pub use tokens::{TokenEnv, resolve_tokens};
 
 use tracing_subscriber::EnvFilter;

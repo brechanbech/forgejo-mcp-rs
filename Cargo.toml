@@ -1,7 +1,7 @@
 [package]
 name = "forgejo-mcp-rs"
-description = "Model Context Protocol servers for Forgejo / Codeberg and its companion Woodpecker CI, in Rust."
-version = "0.17.0"
+description = "Model Context Protocol server for Forgejo / Codeberg, in Rust."
+version = "0.18.0"
 edition = "2024"
 # 1.88: required by `time` >= 0.3.47, the first release fixing RUSTSEC-2026-0009.
 rust-version = "1.88"
@@ -9,12 +9,12 @@ license = "MIT"
 repository = "https://codeberg.org/brechanbech/forgejo-mcp-rs"
 authors = ["Stefan Ractliffe"]
 readme = "README.md"
-keywords = ["mcp", "forgejo", "woodpecker", "codeberg", "ci"]
+keywords = ["mcp", "forgejo", "codeberg", "ci"]
 categories = ["development-tools", "api-bindings"]
 
-# Shared internal library (the `mcp_core`, `forgejo`, and `woodpecker` modules) plus the two thin
-# server binaries. The forgejo and woodpecker servers are separate processes with separate tokens
-# and tool namespaces; they share the in-house REST/MCP core as modules, not as a published crate.
+# Internal library (the `mcp_core` and `forgejo` modules) plus a thin server binary: the
+# substance lives in the library so `cargo test` can reach it, and `mcp_core` stays an
+# internal module rather than a published crate.
 [lib]
 name = "forgejo_mcp_rs"
 path = "src/lib.rs"
@@ -23,13 +23,9 @@ path = "src/lib.rs"
 name = "forgejo-mcp-rs"
 path = "src/bin/forgejo.rs"
 
-[[bin]]
-name = "woodpecker-mcp"
-path = "src/bin/woodpecker.rs"
-
 [lints.rust]
-# These servers reach their hosts over HTTPS — there is no reason to write `unsafe`, so forbid
-# it outright (stronger than `deny`: an inner `allow` can't undo it).
+# This server reaches its host over HTTPS — there is no reason to write `unsafe`, so forbid it
+# outright (stronger than `deny`: an inner `allow` can't undo it).
 unsafe_code = "forbid"
 ambiguous_negative_literals = "warn"
 missing_debug_implementations = "warn"

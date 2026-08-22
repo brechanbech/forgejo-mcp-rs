@@ -1,4 +1,4 @@
-//! Read/write token resolution shared by the server modules.
+//! Read/write token resolution.
 
 use anyhow::Context as _;
 

@@ -8,6 +8,32 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.18.0] — 2026-08-22
+
+### Removed
+
+- **The `woodpecker-mcp` binary.** The companion Woodpecker CI server that shipped in this crate
+  from v0.13.0 now lives in its own repository and crate:
+  [`woodpecker-mcp`](https://codeberg.org/brechanbech/woodpecker-mcp). Its tool surface did not
+  change in the move. If you were using it, install it from the new crate and repoint your MCP
+  client; `WOODPECKER_*` configuration is unchanged. This crate is a single binary again, so
+  `cargo install --path .` no longer needs `--bin`.
+
+  Woodpecker is not a Forgejo component — it drives Gitea, GitHub, GitLab, and Bitbucket equally,
+  and that server only ever called Woodpecker's own API, never Forgejo's. Bundling it here was
+  packaging, not coupling, and it hid the server from every Woodpecker user not running Forgejo.
+
+- `mcp_core::Auth` — with only the Forgejo client left, the credential scheme is no longer a
+  choice; `Authorization: token <t>` is hardcoded in `RestClient`.
+- `RestClient::post_none` — used only by the Woodpecker pipeline-restart endpoint.
+
+### Changed
+
+- `list_tools` is no longer an `async fn` (nothing in it awaits); it returns a ready future.
+  This clears a `clippy::unused_async_trait_impl` failure that a newer clippy had started
+  reporting on the previous code.
+- Documentation throughout no longer describes this as a two-server crate.
+
 ## [0.17.0] — 2026-07-29
 
 ### Added

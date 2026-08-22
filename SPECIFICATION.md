@@ -17,42 +17,36 @@ shell-scripting `curl` against the API or trusting a pre-built third-party serve
 token. It is an **independent implementation over the documented Forgejo API**, not a port
 of any existing server.
 
-A **companion Woodpecker CI server** (`woodpecker-mcp`) ships in the same crate for the common
-self-hosted arrangement where Woodpecker runs alongside Forgejo: it inspects repositories and
-pipelines and, under the same time-boxed write mode, triggers / cancels / restarts them. It is a
-second binary — separate process, separate token, separate tool namespace — reusing the shared
-core, not a Forgejo feature. The two are decoupled at the process level but bundled in one crate
-because, in practice, they are deployed together (see the collapse rationale in Milestones).
-**Either binary runs standalone**: `woodpecker-mcp` has no runtime dependency on the Forgejo server,
-and `cargo install --bin <name>` installs just one — the bundling is packaging, not coupling.
+A **companion Woodpecker CI server** (`woodpecker-mcp`) shipped in this crate as a second binary
+from v0.13.0 through v0.17.0, for the common arrangement where Woodpecker runs alongside Forgejo.
+It moved out at v0.18.0 to its own repository and crate —
+[`woodpecker-mcp`](https://codeberg.org/brechanbech/woodpecker-mcp) — because Woodpecker is not a
+Forgejo component: it drives Gitea, GitHub, GitLab, and Bitbucket equally, that server never
+called the Forgejo API at all, and bundling it here made it invisible to everyone not running
+Forgejo. See the v0.18 section for the full rationale.
 
 ## Architecture
 
-One crate, `forgejo-mcp-rs`, providing **two MCP server binaries** that share an in-house
-REST/MCP core as internal modules. The Forgejo server is the primary; the Woodpecker server is a
-companion for instances that run [Woodpecker CI](https://woodpecker-ci.org/) alongside Forgejo.
-They run as **separate processes with separate tokens and tool namespaces** — not one server with
-two toolsets — so a token for one never sits in the other's process.
+One crate, `forgejo-mcp-rs`, providing one MCP server binary over an in-house REST/MCP core
+(`mcp_core`) kept as internal modules rather than a published crate.
 
 ```
-mcp_core    →  shared transport: RestClient (Auth::{Token,Bearer} + api-prefix),   ← src/mcp_core/
-               ApiError, the Elevation<C> write-mode gate, pagination & helpers
+mcp_core  →  transport: RestClient (token auth + api-prefix), ApiError,   ← src/mcp_core/
+             the Elevation<C> write-mode gate, pagination & helpers
    ↑
-forgejo     →  Forge(RestClient) + #[tool] methods  →  forgejo-mcp-rs binary        ← src/forgejo/
-woodpecker  →  Woodpecker(RestClient) + #[tool] methods  →  woodpecker-mcp binary   ← src/woodpecker/
+forgejo   →  Forge(RestClient) + #[tool] methods  →  forgejo-mcp-rs binary   ← src/forgejo/
 ```
 
-- `src/lib.rs` — declares the three modules. `mcp_core` is `pub(crate)`: it is internal
-  scaffolding, not a public library surface — the crate exists to provide the two binaries.
-- `src/mcp_core/` — the shared, forge-agnostic core, built on `reqwest`:
-  - `rest.rs` — `RestClient`: base-URL/api-prefix joining, a zeroized token presented per an
-    `Auth` scheme (`token …` for Forgejo, `Bearer …` for Woodpecker), one `request()` helper, and
-    `get` / `get_list` / `post` / `post_none` / `post_empty` / `delete` verbs returning raw JSON
-    (`serde_json::Value`).
+- `src/lib.rs` — declares the two modules. `mcp_core` is `pub(crate)`: it is internal scaffolding,
+  not a public library surface — the crate exists to provide the server binary.
+- `src/mcp_core/` — the endpoint-agnostic core, built on `reqwest`:
+  - `rest.rs` — `RestClient`: base-URL/api-prefix joining, a zeroized token presented as
+    `Authorization: token …`, one `request()` helper, and `get` / `get_list` / `post` / `patch` /
+    `post_empty` / `delete` verbs returning raw JSON (`serde_json::Value`).
   - `error.rs` — `ApiError` (config / transport / non-2xx status / decode), which knows whether a
     failure is the caller's (4xx) or ours.
   - `elevation.rs` — `Elevation<C>`, the generic time-boxed write-mode gate (see Security model),
-    reused by both servers over their respective write clients.
+    parameterized with the Forgejo write client.
   - `helpers.rs` — `to_mcp(ApiError)` mapping, `json_result`, the auto-paginator (`gather_all`),
     and the paged/gathered result envelopes.
   - `mod.rs` — re-exports and `init_tracing`.
@@ -60,11 +54,8 @@ woodpecker  →  Woodpecker(RestClient) + #[tool] methods  →  woodpecker-mcp b
   endpoint set), `tools.rs` (tool functions), `server.rs` (`ForgejoMcp { tool_router, forgejo,
   elevation, mirror_token }`, its `#[tool_router]`, and the `ServerHandler`), and `mod.rs::serve()`
   (the stdio entry point).
-- `src/woodpecker/` — the Woodpecker server, same shape: `client.rs` (`Woodpecker`, `api/` +
-  `Authorization: Bearer`, repos keyed by numeric `repo_id` with a `lookup/{owner}/{name}`
-  resolver), `tools.rs`, `server.rs` (`WoodpeckerMcp`), and `mod.rs::serve()`.
-- `src/bin/{forgejo,woodpecker}.rs` — thin `#[tokio::main]` wrappers that call the respective
-  module `serve()`. Logs go to **stderr** (stdout is the MCP stdio transport).
+- `src/bin/forgejo.rs` — a thin `#[tokio::main]` wrapper that calls `forgejo::serve()`. Logs go to
+  **stderr** (stdout is the MCP stdio transport).
 
 Built on `rmcp 3`, which speaks MCP protocol version **2026-07-28** and negotiates down to
 `2024-11-05`. Conventions (lints, CI, pre-push, deny/clippy config) mirror the sibling
@@ -101,16 +92,6 @@ token-scoping tightening, the Actions-runs endpoints); the `version` tool report
 connected instance is running, which is the reliable way to check rather than trusting a
 version named in these docs.
 
-The **Woodpecker server** (`woodpecker-mcp`) takes the analogous variables — same read/write
-discipline, different names:
-
-| Variable | Required | Default | Meaning |
-|---|---|---|---|
-| `WOODPECKER_URL` | **yes** | — | Instance base URL — e.g. `https://ci.codeberg.org` (Codeberg's hosted Woodpecker) or a self-hosted one. No default. |
-| `WOODPECKER_TOKEN_READ_ONLY` | **yes** | — | Personal access token. `WOODPECKER_TOKEN` is accepted as a fallback. |
-| `WOODPECKER_TOKEN_WRITE` | no | — | A second, *different* token; its presence enables the pipeline write tools (see the token-model caveat in v0.13). |
-| `WOODPECKER_WRITE_MINUTES` | no | `10` | Default write-mode window, clamped to `1..=60`. |
-
 ## Security model
 
 - Tokens are read **from the environment only** — never a CLI argument, never written to a
@@ -127,9 +108,9 @@ discipline, different names:
 
 ### Write mode (deliberate, time-boxed elevation)
 
-This mechanism is the generic `Elevation<C>` gate in `mcp_core`; **both servers use it** — the
-Forgejo write tools and the Woodpecker pipeline-action tools are gated identically (the examples
-below are Forgejo's). Even with a write token present, a server **starts read-only** and writes
+This mechanism is the generic `Elevation<C>` gate in `mcp_core`. Even with a write token present,
+the server **starts read-only** and writes are refused until the model deliberately elevates —
+"sudo with a timeout":
 are refused until the model deliberately elevates — "sudo with a timeout":
 
 - `enable_write_mode(minutes?)` activates write mode for `minutes` (default `FORGEJO_WRITE_MINUTES`,
@@ -229,8 +210,11 @@ landed across v0.3–v0.11 and are listed in the README's current tool table rat
 repo has the Actions unit disabled, not that there are no runs. Verified end-to-end against a
 live dispatched run on Codeberg, then running Forgejo 15.
 
-### v0.13 — the `woodpecker-mcp` companion server
+### v0.13 — the `woodpecker-mcp` companion server *(moved out in v0.18)*
 
+> This server now lives in its own repository and crate:
+> [`woodpecker-mcp`](https://codeberg.org/brechanbech/woodpecker-mcp). The section is kept for the
+> record; see v0.18 below for why it moved.
 A second binary (see Architecture and Purpose) targeting Woodpecker CI. Woodpecker authenticates
 with `Authorization: Bearer`, prefixes its API with `api/`, addresses repositories by numeric
 `repo_id`, and paginates with `page` / `perPage` returning bare arrays (no `X-Total-Count`, so the
@@ -282,8 +266,8 @@ No tool changes; the tool surface is identical to v0.15. What moved:
 | Change | Why |
 |---|---|
 | `rmcp 1.7` → `3` | Protocol version 2026-07-28 support. `Content` was renamed `ContentBlock`; that rename is the entire mechanical cost of the migration. |
-| `list_tools` overridden in both servers | 2026-07-28 (SEP-2549) requires `ttlMs` and `cacheScope` on `tools/list`; the `#[tool_handler]`-generated body leaves both `None`. Built by `mcp_core::tool_list_result`. |
-| `server_info` set explicitly | `Implementation::from_build_env` expands `env!` inside *rmcp*, so both servers were identifying themselves as `rmcp 3.0.0`. Now `forgejo-mcp-rs` / `woodpecker-mcp` at the crate version — the name is the **binary's**, since one package ships two servers. |
+| `list_tools` overridden | 2026-07-28 (SEP-2549) requires `ttlMs` and `cacheScope` on `tools/list`; the `#[tool_handler]`-generated body leaves both `None`. Built by `mcp_core::tool_list_result`. |
+| `server_info` set explicitly | `Implementation::from_build_env` expands `env!` inside *rmcp*, so the server was identifying itself as `rmcp 3.0.0`. Now `forgejo-mcp-rs` at the crate version. |
 | `base64 0.22` → `0.23` | Matches rmcp's. Does **not** clear the `cargo deny` duplicate warning: `reqwest`/`hyper-util` still pin 0.22, so two versions remain in the tree until they update. |
 
 **Cache hints.** `ttlMs` is one hour and `cacheScope` is `public`. Public is safe because the
@@ -337,12 +321,41 @@ shared variable would mean a credential issued for host A being sent to host B o
 say-so. Authentication is opt-in (`auth_username`, or `authenticate` alone for token-only
 forges), since the common case — a public source — needs no credential at all.
 
+### v0.18 — the Woodpecker server moves out
+
+The `woodpecker-mcp` binary added at v0.13 left for its own repository and crate:
+[`woodpecker-mcp`](https://codeberg.org/brechanbech/woodpecker-mcp). Its tool surface did not
+change in the move; this crate is a single binary again.
+
+**Why.** The v0.13 bundling reasoning was that Woodpecker only runs in tandem with Forgejo, so one
+legible crate beat a trio. The first half of that turned out to be wrong: Woodpecker drives Gitea,
+GitHub, GitLab, and Bitbucket as readily as Forgejo, and this repository's own Woodpecker server
+never called the Forgejo API at all — it spoke only to Woodpecker's, which already normalizes the
+forge behind it. So there was never a technical coupling, only a packaging one, and that packaging
+actively hid the server from every Woodpecker user not on Forgejo. crates.io being the project's
+discovery surface is exactly why that matters: nobody searching for a Woodpecker MCP server finds
+one inside a crate named for Forgejo.
+
+**The shared core went by copy, not by dependency.** Splitting the repository forced the question
+`mcp_core` had been deferring: publish it as a crate both projects depend on, or duplicate it. It
+was copied. Across v0.13–v0.17 `mcp_core` was touched by **four commits** — thin, static
+scaffolding, not a living library, and publishing it would have imposed an API-stability
+obligation out of all proportion to that, recreating the very three-crate arrangement v0.13
+collapsed. A git dependency was not an option: crates.io rejects published crates carrying one,
+which would have killed `cargo install` and the registry listing with it. The two copies are free
+to diverge, and are expected to.
+
+**What this crate shed.** With the Woodpecker server gone, `mcp_core` lost the pieces only it
+used: the `Auth` scheme enum (this server is always `Authorization: token`, so the scheme is now
+hardcoded) and the `post_none` verb. `list_tools` also stopped being an `async fn` — nothing in it
+awaits — which a newer clippy had begun flagging.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
 an HTTP 4xx (bad token, not found, bad request) becomes `invalid_params` (the caller's
-problem); config, transport, 5xx, and decode failures become `internal_error`. (In the forge
-clients the type is re-exported as `ForgeError` / `WoodpeckerError` for readability.)
+problem); config, transport, 5xx, and decode failures become `internal_error`. (In the Forgejo
+client the type is re-exported as `ForgeError` for readability.)
 
 ## Concurrency & testing
 
@@ -359,13 +372,12 @@ a real client) so slow responses can return.
 
 ## Non-goals
 
-- Not a full Forgejo (or Woodpecker) SDK — the in-house `mcp_core` client covers only the ~30
-  endpoints the two servers touch, not the whole REST surface of either.
+- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~30 endpoints this
+  server touches, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
-- No webhooks or admin tooling. CI control is limited to dispatch (Forgejo) and
-  trigger/cancel/restart (Woodpecker) — with **no log or artifact retrieval**, as neither forge
-  exposes a repo-level endpoint for it.
+- No webhooks or admin tooling. CI control is limited to `dispatch_workflow` — with **no log or
+  artifact retrieval**, as Forgejo exposes no repo-level endpoint for it.
 
 ### CI status: dropped via commit-status, later solved via the Actions-runs API (v0.12.0)
 
@@ -415,10 +427,12 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
    `dispatch_workflow`. *(done)*
 5. **v0.13.0** — extracted the shared `mcp_core` (generic `RestClient` + `Elevation<C>`) and added
    the companion `woodpecker-mcp` server. Briefly a three-crate workspace (with a published
-   `forgejo-mcp-core`), then **collapsed to one crate + two binaries** once it was clear Woodpecker
-   only runs in tandem with Forgejo and crates.io is the project's only real discovery surface — one
-   legible crate beats a trio with an internal helper crate on display. *(done)*
+   `forgejo-mcp-core`), then **collapsed to one crate + two binaries**. *(done; superseded by
+   v0.18.0)*
 6. **v0.16.0** — moved to `rmcp 3` / MCP protocol version 2026-07-28: `tools/list` cache hints
    and correct server identity in `server/discover`. No tool changes. *(done)*
-7. Later — issue/PR writes, slimmed Woodpecker/passthrough output, sort filters, a
-   Woodpecker `version`/instance tool.
+7. **v0.17.0** — `migrate_repo`, the only tool that carries issues and PRs in from another
+   instance. *(done)*
+8. **v0.18.0** — the Woodpecker server moved out to its own repository and crate; this crate is a
+   single binary again. *(done)*
+9. Later — issue/PR writes, sort filters, and slimming what still passes through raw.

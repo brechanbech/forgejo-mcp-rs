@@ -1,7 +1,7 @@
 //! Result and pagination helpers shared by the tool layers.
 //!
 //! These convert raw API JSON and [`ApiError`]s into [`CallToolResult`]s, and drive
-//! offset-pagination endpoints to completion. They are forge-agnostic: anything that returns
+//! offset-pagination endpoints to completion. They are endpoint-agnostic: anything that returns
 //! `serde_json::Value` pages and an optional `X-Total-Count` can reuse them.
 
 use std::pin::Pin;
@@ -59,7 +59,7 @@ pub fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> 
 
 /// Freshness hint advertised on `tools/list`: one hour.
 ///
-/// Both servers register their tool set once, at construction, and never mutate it, so the list
+/// The server registers its tool set once, at construction, and never mutates it, so the list
 /// is constant for the life of the process. An hour is long enough to stop a client re-listing
 /// on every turn, short enough that a client persisting the cache across restarts picks up an
 /// upgraded binary promptly.

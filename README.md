@@ -16,41 +16,32 @@ repositories, issues, and pull requests — over the Forgejo REST API.
 > time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
 It speaks the Forgejo REST API directly through a small, in-house client (`src/forgejo/client.rs`,
-over the shared `src/mcp_core/` transport) — an **independent implementation over the documented
+over the `src/mcp_core/` transport) — an **independent implementation over the documented
 API**, not a port of any other server. There is no third-party forge SDK in the trust path, so the
 tool surface holding your token is code you can read and audit end to end.
 
-Both servers speak **MCP protocol version 2026-07-28** (since v0.16) and negotiate down to
-`2024-11-05`, so older clients keep working unchanged. They run over **stdio** and expose
+The server speaks **MCP protocol version 2026-07-28** (since v0.16) and negotiates down to
+`2024-11-05`, so older clients keep working unchanged. It runs over **stdio** and exposes
 **tools only** — no resources, prompts, sampling, or roots.
 
 ## Build
 
 ```sh
-cargo build --release                        # both binaries under target/release/
-cargo install --path .                       # install both to ~/.cargo/bin
-cargo install --path . --bin woodpecker-mcp  # …or just one (--bin forgejo-mcp-rs for the other)
+cargo build --release   # target/release/forgejo-mcp-rs
+cargo install --path .  # install to ~/.cargo/bin
 ```
 
-## Binaries
+## Woodpecker CI
 
-This crate ships **two** MCP servers as separate binaries that share the in-house REST/MCP core
-(`src/mcp_core/`) as internal modules:
+A companion server for [Woodpecker CI](https://woodpecker-ci.org/) shipped in this crate as a
+second `woodpecker-mcp` binary from v0.13.0 through v0.17.0. **It now lives in its own repository
+and crate:** [`woodpecker-mcp`](https://codeberg.org/brechanbech/woodpecker-mcp).
 
-- **`forgejo-mcp-rs`** — the Forgejo / Codeberg server documented below.
-- **`woodpecker-mcp`** — a companion server for [Woodpecker CI](https://woodpecker-ci.org/) when
-  it runs alongside your Forgejo instance: list repos and pipelines, and (guarded) trigger, cancel,
-  and restart pipelines. It uses `WOODPECKER_URL` and `WOODPECKER_TOKEN_READ_ONLY` /
-  `WOODPECKER_TOKEN_WRITE`, and the same time-boxed write-mode elevation as the Forgejo server.
-  Woodpecker addresses repositories by numeric id, so `lookup_repo` resolves an `owner/name` to it.
-
-Each runs **independently** — same crate, but no runtime coupling. `woodpecker-mcp` needs only
-`WOODPECKER_URL` and a Woodpecker token and works with or without the Forgejo server installed;
-"companion" just means Woodpecker CI is usually deployed alongside Forgejo, not that either server
-depends on the other. So you needn't install both: `cargo install --path .` builds both, or add
-`--bin woodpecker-mcp` (or `--bin forgejo-mcp-rs`) to install just one. Enable whichever you need in
-your MCP client — the Forgejo server is documented first, the Woodpecker server has its own section
-([below](#woodpecker-server-woodpecker-mcp)).
+Woodpecker is its own system — it drives Gitea, GitHub, GitLab, and Bitbucket as readily as
+Forgejo, and that server never called the Forgejo API at all — so bundling it here made it
+invisible to everyone not running Forgejo. Nothing about it changed in the move; if you were using
+the `woodpecker-mcp` binary from this crate, install it from the new crate instead and point your
+MCP client at the new path.
 
 ## Configure
 
@@ -211,66 +202,6 @@ a tool argument, so it stays out of the conversation. See
 [Migration source token](#migration-source-token-optional) for how to mint and scope it — and
 for where it ends up, which is not where the other tokens go.
 
-## Woodpecker server (`woodpecker-mcp`)
-
-The companion server for a [Woodpecker CI](https://woodpecker-ci.org/) instance running alongside
-your Forgejo. It reads repositories and pipelines and, behind the same write mode, triggers,
-cancels, and restarts them — a separate process with its own token and tool namespace.
-
-### Configure
-
-| Variable | Required | Default | Meaning |
-|---|---|---|---|
-| `WOODPECKER_URL` | **yes** | — | Instance base URL, e.g. `https://ci.codeberg.org` (Codeberg's hosted Woodpecker) or your own. No default. |
-| `WOODPECKER_TOKEN_READ_ONLY` | **yes** | — | Personal access token (or `WOODPECKER_TOKEN`). |
-| `WOODPECKER_TOKEN_WRITE` | no | — | A **second, different** token that enables the pipeline write tools — see the note below. |
-| `WOODPECKER_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
-
-Mint a personal access token from your Woodpecker profile (user icon, top right). If your repos are
-on Codeberg, its hosted Woodpecker is at `https://ci.codeberg.org` — log in with your Codeberg
-account and copy the token from your profile page.
-
-**Read vs write — a Woodpecker limitation.** Woodpecker issues **one token per user** and does *not*
-scope it read-only vs write (your rights come from your forge repo access — pull vs push). But the
-write tools here require `WOODPECKER_TOKEN_WRITE` to be a **different** token from the read one. So:
-
-- **Read-only (recommended):** set `WOODPECKER_TOKEN_READ_ONLY` only, leave `WOODPECKER_TOKEN_WRITE`
-  unset — the write tools stay disabled.
-- **To enable trigger/cancel/restart:** you need a second, distinct token, which in practice means a
-  **second Woodpecker/forge account** (a bot with push access), since one account yields only one
-  token.
-
-Write mode itself works exactly like the Forgejo server (`enable_write_mode` / `write_status`).
-
-Woodpecker addresses repositories by a **numeric `repo_id`**, not `owner/name`. Use `lookup_repo`
-(or read the `id` from `list_repos`) to resolve a name to its id, then pass that id to the other
-tools.
-
-### Wire it into Claude Code
-
-```sh
-claude mcp add --scope user woodpecker /path/to/target/release/woodpecker-mcp \
-  --env WOODPECKER_URL=https://ci.example.org \
-  --env WOODPECKER_TOKEN_READ_ONLY=your_read_token_here
-# add --env WOODPECKER_TOKEN_WRITE=… only if you want the (gated) pipeline write tools
-```
-
-### Tools
-
-| Tool |  | Notes |
-|---|---|---|
-| `whoami` | read | The authenticated user (verifies the token) |
-| `list_repos` | read | Repositories you can access (auto-paginated); each item carries the numeric `id` |
-| `lookup_repo` | read | Resolve `owner/name` → the repo record, including its numeric `id` |
-| `get_repo` | read | One repository's details by `repo_id` |
-| `list_pipelines` | read | A repo's pipeline runs by `repo_id`, newest first (auto-paginated); a run's outcome is its `status` |
-| `get_pipeline` | read | One pipeline by `repo_id` + its per-repo `number` |
-| `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
-| `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
-| `trigger_pipeline` | **write** | Start a pipeline (`repo_id`, optional `branch` and `variables`) |
-| `cancel_pipeline` | **write** | Cancel a running pipeline (`repo_id`/`number`) |
-| `restart_pipeline` | **write** | Re-run a pipeline (`repo_id`/`number`); returns the new run |
-
 ## Security
 
 The token is read from the environment only — never logged, never written to disk (the client
@@ -307,6 +238,10 @@ in [`SPECIFICATION.md`](SPECIFICATION.md).
 Releases through v0.5 were built on the [`forgejo-api`](https://codeberg.org/Cyborus/forgejo-api)
 crate by Cyborus. `forgejo-mcp-rs` now talks to the Forgejo REST API through its own small
 client and carries no third-party forge SDK.
+
+The companion Woodpecker CI server that shipped here as a second binary from v0.13.0 to v0.17.0
+moved to its own repository at v0.18.0 —
+[`woodpecker-mcp`](https://codeberg.org/brechanbech/woodpecker-mcp).
 
 ## License
 

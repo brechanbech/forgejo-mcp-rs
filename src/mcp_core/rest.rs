@@ -1,14 +1,10 @@
-//! A small, in-house REST client shared by the forge MCP servers.
+//! A small, in-house REST client for the Forgejo API.
 //!
-//! Each server only touches a handful of endpoints, so rather than depend on a third-party SDK
+//! The server only touches a handful of endpoints, so rather than depend on a third-party SDK
 //! we speak the documented REST API directly over [`reqwest`]. Every response is returned as raw
-//! JSON ([`serde_json::Value`]); the per-server tool layer reshapes it. The token is held in a
+//! JSON ([`serde_json::Value`]); the tool layer reshapes it. The token is held in a
 //! [`Zeroizing`] string and wiped on drop, and the `Authorization` header is marked sensitive so
 //! it never lands in logs.
-//!
-//! Two knobs cover the differences between forges: the [`Auth`] scheme (Forgejo's
-//! `Authorization: token <t>` vs Woodpecker's `Authorization: Bearer <t>`) and the API path
-//! prefix (`api/v1/` vs `api/`).
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use reqwest::{Client, Method};
@@ -18,42 +14,22 @@ use zeroize::Zeroizing;
 
 use super::error::ApiError;
 
-/// Header some list endpoints set with the full (unpaginated) item count. Absent on servers
-/// that don't report it (e.g. Woodpecker) — [`super::gather_all`] then detects the end by a
-/// short final page instead.
+/// Header the list endpoints set with the full (unpaginated) item count. Absent when an
+/// instance doesn't report it — [`super::gather_all`] then detects the end by a short final
+/// page instead.
 const TOTAL_COUNT: &str = "x-total-count";
 
-/// How the bearer credential is presented in the `Authorization` header.
-#[derive(Clone, Copy, Debug)]
-pub enum Auth {
-    /// `Authorization: token <token>` — Forgejo / Gitea.
-    Token,
-    /// `Authorization: Bearer <token>` — Woodpecker and most OAuth-style APIs.
-    Bearer,
-}
-
-impl Auth {
-    fn header_value(self, token: &str) -> String {
-        match self {
-            Auth::Token => format!("token {token}"),
-            Auth::Bearer => format!("Bearer {token}"),
-        }
-    }
-}
-
 /// Everything needed to construct a [`RestClient`]. A plain config struct (all fields required)
-/// rather than a five-argument `new`.
+/// rather than a four-argument `new`.
 #[derive(Debug)]
 pub struct RestConfig<'a> {
-    /// Instance base URL, e.g. `https://codeberg.org` or `https://ci.example.org`.
+    /// Instance base URL, e.g. `https://codeberg.org`.
     pub base_url: &'a Url,
     /// API token for this client.
     pub token: &'a str,
-    /// API path prefix joined onto the base URL, e.g. `api/v1/` or `api/`. Include the trailing
+    /// API path prefix joined onto the base URL, e.g. `api/v1/`. Include the trailing
     /// slash.
     pub api_prefix: &'a str,
-    /// How to present the token.
-    pub auth: Auth,
     /// `User-Agent` sent on every request, e.g. `forgejo-mcp-rs/0.12.0`.
     pub user_agent: &'a str,
 }
@@ -67,7 +43,6 @@ pub struct RestClient {
     api_prefix: String,
     /// API token, zeroized on drop.
     token: Zeroizing<String>,
-    auth: Auth,
 }
 
 impl std::fmt::Debug for RestClient {
@@ -75,7 +50,6 @@ impl std::fmt::Debug for RestClient {
         // Never expose the token.
         f.debug_struct("RestClient")
             .field("api_root", &self.api_root.as_str())
-            .field("auth", &self.auth)
             .finish_non_exhaustive()
     }
 }
@@ -119,7 +93,6 @@ impl RestClient {
             api_root,
             api_prefix: cfg.api_prefix.to_owned(),
             token: Zeroizing::new(cfg.token.to_owned()),
-            auth: cfg.auth,
         })
     }
 
@@ -139,7 +112,7 @@ impl RestClient {
 
         // Build the auth header per request and mark it sensitive so reqwest keeps it out of any
         // debug output. The persistent copy lives in `self.token` and is zeroized on drop.
-        let mut auth = HeaderValue::from_str(&self.auth.header_value(self.token.as_str()))
+        let mut auth = HeaderValue::from_str(&format!("token {}", self.token.as_str()))
             .map_err(|e| ApiError::Config(format!("invalid token: {e}")))?;
         auth.set_sensitive(true);
 
@@ -233,20 +206,6 @@ impl RestClient {
     pub async fn post_empty(&self, path: &str) -> Result<(), ApiError> {
         self.request(Method::POST, path, &[], None).await?;
         Ok(())
-    }
-
-    /// `POST` with no request body, returning the response resource — for action endpoints that
-    /// take no input but report the object they created (e.g. restarting a pipeline). Empty
-    /// bodies become `Null`.
-    ///
-    /// # Errors
-    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures.
-    pub async fn post_none(&self, path: &str) -> Result<Value, ApiError> {
-        Ok(self
-            .request(Method::POST, path, &[], None)
-            .await?
-            .0
-            .unwrap_or(Value::Null))
     }
 
     /// `DELETE`, discarding any (typically empty) body.

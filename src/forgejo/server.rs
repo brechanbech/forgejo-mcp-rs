@@ -582,7 +582,7 @@ impl ServerHandler for ForgejoMcp {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         // NOT Default: `Implementation::from_build_env` expands `env!` inside rmcp, so it names
         // the SDK ("rmcp 3.0.0") rather than this server. Clients see this in `server/discover`.
-        // The name is the binary's, not the package's — one package ships two servers.
+        // The crate, the binary, and the server all share the name.
         info.server_info = Implementation::new("forgejo-mcp-rs", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Tools for inspecting a Forgejo/Codeberg account and its repositories (user, \
@@ -615,12 +615,15 @@ impl ServerHandler for ForgejoMcp {
 
     /// Overrides the `#[tool_handler]`-generated body solely to attach the `2026-07-28` cache
     /// hints; the tool set itself is still whatever the router holds. See [`tool_list_result`].
-    async fn list_tools(
+    ///
+    /// Not `async fn`: there is nothing to await, so return a ready future directly (clippy's
+    /// `unused_async_trait_impl`).
+    fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        Ok(tool_list_result(self.tool_router.list_all()))
+    ) -> impl Future<Output = Result<ListToolsResult, McpError>> {
+        std::future::ready(Ok(tool_list_result(self.tool_router.list_all())))
     }
 }
 

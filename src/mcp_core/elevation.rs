@@ -5,8 +5,8 @@
 //! successful write slides the window forward, and it otherwise expires back to read-only. This
 //! is deliberately not a permanent mode — there is a hard cap on the window length.
 //!
-//! The type is generic over the client `C`, so any server (Forgejo, Woodpecker, …) reuses the
-//! same gating by parameterizing it with its own write client.
+//! The type is generic over the client `C`, so the gate is independent of the API it guards —
+//! it is parameterized here with the Forgejo write client, and the unit tests use a dummy.
 
 // Every accessor locks the private `state` Mutex with `.unwrap()`. The only way that panics is a
 // poisoned lock, which cannot happen here: no code panics while holding it. So the pedantic
