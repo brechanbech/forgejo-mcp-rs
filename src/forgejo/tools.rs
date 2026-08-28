@@ -851,26 +851,40 @@ pub struct PullRequestDiffParams {
     pub max_bytes: Option<usize>,
 }
 
+/// Turns raw API file entries into the review-relevant summary, dropping the three URL fields.
+fn slim_changed_files(items: Vec<Value>) -> Vec<ChangedFileSummary> {
+    items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect()
+}
+
 /// Lists the files a pull request changes, with per-file line counts.
 pub async fn list_pull_request_files(
     forge: &Forge,
     params: ListPullRequestFilesParams,
 ) -> Result<CallToolResult, McpError> {
-    let (raw, total) = forge
-        .list_pull_request_files(
-            &params.owner,
-            &params.repo,
-            params.index,
-            params.page,
-            params.limit,
-        )
+    let (owner, repo, index) = (&params.owner, &params.repo, params.index);
+    // With no explicit paging, walk every page so the caller gets the complete set; an
+    // explicit page or limit opts back into single-page control.
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| {
+            Box::pin(forge.list_pull_request_files(owner, repo, index, Some(page), Some(limit)))
+        })
         .await
         .map_err(to_mcp)?;
-    let files: Vec<ChangedFileSummary> = into_items(raw)
-        .into_iter()
-        .filter_map(|v| serde_json::from_value(v).ok())
-        .collect();
-    paged_result(params.page, params.limit, total, &files)
+        return gathered_result(&slim_changed_files(all.items), all.total, all.truncated);
+    }
+    let (raw, total) = forge
+        .list_pull_request_files(owner, repo, index, params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(
+        params.page,
+        params.limit,
+        total,
+        &slim_changed_files(into_items(raw)),
+    )
 }
 
 /// Strips a unified diff's `a/` or `b/` prefix from a path, rejecting the `/dev/null` placeholder
@@ -2148,10 +2162,7 @@ rename to new/name.rs
             "contents_url": "https://codeberg.org/api/v1/repos/o/r/contents/src/main.rs",
             "raw_url": "https://codeberg.org/o/r/raw/commit/deadbeef/src/main.rs"
         }]);
-        let files: Vec<ChangedFileSummary> = into_items(raw)
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
+        let files = slim_changed_files(into_items(raw));
         assert_eq!(files.len(), 1);
 
         let v = serde_json::to_value(&files[0]).unwrap();

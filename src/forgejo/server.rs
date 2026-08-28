@@ -306,7 +306,7 @@ impl ForgejoMcp {
 
     /// Lists the files a pull request changes.
     #[tool(
-        description = "List the files a pull request changes, with per-file additions/deletions and rename info (owner/repo/index; optional page/limit). Forgejo does not return the hunks here — pass a filename to get_pull_request_diff for the content."
+        description = "List the files a pull request changes, with per-file additions/deletions and rename info (owner/repo/index; optional page/limit, auto-paginated when both are omitted). Forgejo does not return the hunks here — pass a filename to get_pull_request_diff for the content."
     )]
     async fn list_pull_request_files(
         &self,

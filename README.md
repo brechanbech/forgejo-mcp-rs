@@ -150,7 +150,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_notifications` | read | Your notification threads, slimmed (`all=true` for read+unread) |
 | `list_issue_comments` | read | Comments on an issue/PR (slimmed) |
 | `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
-| `list_pull_request_files` | read | Files a PR changes, with per-file additions/deletions and rename info. Forgejo omits the hunks here — use `get_pull_request_diff` for content |
+| `list_pull_request_files` | read | Files a PR changes (auto-paginated), with per-file additions/deletions and rename info. Forgejo omits the hunks here — use `get_pull_request_diff` for content |
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
 | `list_workflow_runs` | read | Forgejo Actions (CI) runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` (no separate conclusion) |
 | `get_workflow_run` | read | One workflow run by `run_id` (full detail) |

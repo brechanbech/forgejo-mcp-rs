@@ -23,7 +23,9 @@ were not.
   window (`start_line` after `end_line`) is an error.
 - **`list_pull_request_files`** — the files a pull request changes, with `additions` /
   `deletions` / `changes` and `previous_filename` on a rename. Forgejo's three per-file URL
-  fields are dropped.
+  fields are dropped. Auto-paginates to the complete set when `page` and `limit` are both
+  omitted, matching `list_my_repos` and the other list tools; pass either to take single-page
+  control. The auto-paginator's 1000-item cap still applies and surfaces as `truncated`.
 - **`get_pull_request_diff`** — a pull request's unified diff. `file_path` narrows it to one
   file, matching either side of a rename, which is the intended path for review work. Without it
   the whole diff is truncated at 64 KiB (`max_bytes` overrides) at a line boundary and flagged

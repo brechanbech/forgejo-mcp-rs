@@ -375,6 +375,12 @@ and is the intended path for review work. Without it, the whole diff is truncate
 (`max_bytes` overrides) at a line boundary, flagged `truncated`, with a note naming
 `list_pull_request_files` — the same "cap and say so" contract `gather_all` uses.
 
+`list_pull_request_files` auto-paginates like the other list tools when neither `page` nor `limit`
+is given. That is a deliberate exception to the bounded-reads theme of this release: a file *list*
+is a few dozen bytes per entry and is exactly the index a caller needs to decide what to read
+next, whereas the diff it points at is the unbounded thing. The 1000-item cap still guards the
+pathological case.
+
 **Two API facts drove the shape.** Forgejo's `/files` endpoint does **not** carry the `patch`
 field GitHub's equivalent returns, so the file list cannot supply hunks and a second call is
 unavoidable — this is not a design preference. And `.diff` serves `text/plain`, not JSON, which is
