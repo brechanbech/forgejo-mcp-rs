@@ -244,7 +244,7 @@ impl ForgejoMcp {
 
     /// Reads a file's contents (or lists a directory) from a repository.
     #[tool(
-        description = "Read a file's contents from a repository (owner/repo/path, optional ref); decodes text, lists directories"
+        description = "Read a file's contents from a repository (owner/repo/path, optional ref); decodes text, lists directories. Optional start_line/end_line take a 1-indexed inclusive window, clamped to the file; `total_lines` is always reported so you can page through a large file instead of pulling it whole."
     )]
     async fn get_file_contents(
         &self,
@@ -302,6 +302,28 @@ impl ForgejoMcp {
         Parameters(params): Parameters<tools::ListReviewsParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::list_pull_request_reviews(&self.forgejo, params).await
+    }
+
+    /// Lists the files a pull request changes.
+    #[tool(
+        description = "List the files a pull request changes, with per-file additions/deletions and rename info (owner/repo/index; optional page/limit). Forgejo does not return the hunks here — pass a filename to get_pull_request_diff for the content."
+    )]
+    async fn list_pull_request_files(
+        &self,
+        Parameters(params): Parameters<tools::ListPullRequestFilesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_pull_request_files(&self.forgejo, params).await
+    }
+
+    /// Reads a pull request's unified diff, optionally one file of it.
+    #[tool(
+        description = "Read a pull request's unified diff (owner/repo/index). Pass file_path for just that file's hunks — the exact path from list_pull_request_files, matching either side of a rename. Without it the whole diff is returned, truncated at 64 KiB (raise with max_bytes)."
+    )]
+    async fn get_pull_request_diff(
+        &self,
+        Parameters(params): Parameters<tools::PullRequestDiffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_pull_request_diff(&self.forgejo, params).await
     }
 
     /// Lists a repository's Forgejo Actions (CI) workflow runs.

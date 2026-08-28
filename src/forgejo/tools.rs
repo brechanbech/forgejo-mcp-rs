@@ -105,6 +105,12 @@ pub struct FileContentsParams {
     /// Branch, tag, or commit to read from. Defaults to the repository's default branch.
     #[serde(default, rename = "ref")]
     pub git_ref: Option<String>,
+    /// First line to return, 1-indexed and inclusive. Omit to start at the top of the file.
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// Last line to return, 1-indexed and inclusive. Omit to read to the end of the file.
+    #[serde(default)]
+    pub end_line: Option<u32>,
 }
 
 /// Parameters for listing issues or pull requests in a repository.
@@ -302,6 +308,51 @@ pub async fn list_branches(
     )
 }
 
+/// Applies an optional 1-indexed, inclusive line window to `text`.
+///
+/// Returns the selected text and the window actually applied, both clamped to the file's extent —
+/// so `end_line` past the end simply stops at the last line. A `start_line` past the end is not an
+/// error either: the file genuinely has no such line, and an empty slice alongside `total_lines`
+/// says so more usefully than a failure. Only an inverted window (`start_line` after `end_line`)
+/// is rejected, since no file could satisfy it.
+///
+/// The slice is re-joined with `\n`, so a file with CRLF endings comes back normalized and the
+/// final line carries no trailing newline.
+///
+/// # Errors
+/// `invalid_params` if both bounds are given and `start_line` is greater than `end_line`.
+fn slice_lines(
+    text: &str,
+    start: Option<u32>,
+    end: Option<u32>,
+    total: usize,
+) -> Result<(String, Option<(usize, usize)>), McpError> {
+    if start.is_none() && end.is_none() {
+        return Ok((text.to_owned(), None));
+    }
+    if let (Some(s), Some(e)) = (start, end)
+        && s > e
+    {
+        return Err(McpError::invalid_params(
+            format!("start_line {s} is after end_line {e}"),
+            None,
+        ));
+    }
+    let first = (start.unwrap_or(1) as usize).max(1);
+    let last = end.map_or(total, |e| e as usize).min(total);
+    if first > last {
+        // Window starts past the end of the file: no lines, reported honestly.
+        return Ok((String::new(), Some((first, last))));
+    }
+    let slice = text
+        .lines()
+        .skip(first - 1)
+        .take(last - first + 1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((slice, Some((first, last))))
+}
+
 /// Reads a file's contents (or lists a directory) from `owner/repo`. For a file the base64 body
 /// is decoded: UTF-8 text is returned inline; binary content is reported by size, not dumped.
 pub async fn get_file_contents(
@@ -354,8 +405,18 @@ pub async fn get_file_contents(
     match decoded {
         Some(bytes) => match String::from_utf8(bytes) {
             Ok(text) => {
+                // `total_lines` is always reported, so a caller that asked for a window knows
+                // how much file lies outside it and can page through the rest.
+                let total_lines = text.lines().count();
+                let (content, window) =
+                    slice_lines(&text, params.start_line, params.end_line, total_lines)?;
                 out.insert("encoding".to_owned(), Value::String("utf-8".to_owned()));
-                out.insert("content".to_owned(), Value::String(text));
+                out.insert("total_lines".to_owned(), Value::from(total_lines));
+                if let Some((first, last)) = window {
+                    out.insert("start_line".to_owned(), Value::from(first));
+                    out.insert("end_line".to_owned(), Value::from(last));
+                }
+                out.insert("content".to_owned(), Value::String(content));
             }
             Err(e) => {
                 out.insert("encoding".to_owned(), Value::String("binary".to_owned()));
@@ -729,6 +790,240 @@ pub async fn list_pull_request_reviews(
     let reviews: Vec<RawReview> = decode(raw)?;
     let items: Vec<ReviewSummary> = reviews.into_iter().map(summarize_review).collect();
     paged_result(params.page, params.limit, total, &items)
+}
+
+/// Default cap on an unfiltered pull-request diff, in bytes. A whole diff is unbounded output —
+/// the reason log retrieval is a non-goal — so it is truncated at a line boundary and flagged
+/// rather than returned whole. Ask for one file at a time to stay under it.
+const DIFF_MAX_BYTES: usize = 64 * 1024;
+
+/// One file's entry in `list_pull_request_files`. Forgejo returns three URL fields per file
+/// (`html_url`, `contents_url`, `raw_url`) that restate the path in three ways; they are dropped.
+#[derive(Debug, serde::Deserialize, Serialize)]
+struct ChangedFileSummary {
+    filename: String,
+    /// Present only on a rename — the path this file had before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    additions: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deletions: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changes: Option<i64>,
+}
+
+/// Parameters for listing a pull request's changed files.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListPullRequestFilesParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull request number within the repository.
+    pub index: i64,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Parameters for reading a pull request's diff.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct PullRequestDiffParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull request number within the repository.
+    pub index: i64,
+    /// Return only this file's hunks. Matches either side of a rename, and must be the exact
+    /// path as listed by `list_pull_request_files` (no globs). Omit for the whole diff.
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// Cap on the returned diff in bytes (default 65536), applied at a line boundary. Ignored
+    /// when `file_path` selects a single file.
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+}
+
+/// Lists the files a pull request changes, with per-file line counts.
+pub async fn list_pull_request_files(
+    forge: &Forge,
+    params: ListPullRequestFilesParams,
+) -> Result<CallToolResult, McpError> {
+    let (raw, total) = forge
+        .list_pull_request_files(
+            &params.owner,
+            &params.repo,
+            params.index,
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    let files: Vec<ChangedFileSummary> = into_items(raw)
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    paged_result(params.page, params.limit, total, &files)
+}
+
+/// Strips a unified diff's `a/` or `b/` prefix from a path, rejecting the `/dev/null` placeholder
+/// that stands in for the missing side of an add or delete.
+fn strip_diff_prefix(path: &str) -> Option<String> {
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(
+        path.strip_prefix("a/")
+            .or_else(|| path.strip_prefix("b/"))
+            .unwrap_or(path)
+            .to_owned(),
+    )
+}
+
+/// One file's section of a unified diff.
+#[derive(Debug)]
+struct DiffSection {
+    /// Every path this section names — both sides of a rename, so a caller matches on either.
+    paths: Vec<String>,
+    text: String,
+}
+
+/// Splits a unified diff into per-file sections.
+///
+/// A section starts at a `diff --git a/OLD b/NEW` header and runs to the next one. Paths come
+/// from that header and from the `---` / `+++` lines that follow it, which name each side
+/// unambiguously even when the header is hard to split (a path containing a space). Only the
+/// lines *before* the first `@@` are scanned for those markers: inside a hunk, a removed line
+/// whose content begins with `-- ` is itself rendered as `--- `, and would otherwise be mistaken
+/// for a file header.
+fn split_diff_sections(diff: &str) -> Vec<DiffSection> {
+    let mut sections: Vec<DiffSection> = Vec::new();
+    let mut in_hunks = false;
+
+    for line in diff.lines() {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            let tokens: Vec<&str> = header.split_whitespace().collect();
+            let mut paths: Vec<String> = Vec::new();
+            if tokens.len() == 2 {
+                // The two sides are identical for an ordinary edit and differ only on a rename,
+                // so dedupe rather than listing the same path twice.
+                for path in tokens.iter().filter_map(|t| strip_diff_prefix(t)) {
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
+            sections.push(DiffSection {
+                paths,
+                text: String::new(),
+            });
+            in_hunks = false;
+        }
+
+        let Some(section) = sections.last_mut() else {
+            continue; // preamble before the first file header — not part of any section
+        };
+
+        if line.starts_with("@@") {
+            in_hunks = true;
+        } else if !in_hunks {
+            for marker in ["--- ", "+++ "] {
+                if let Some(rest) = line.strip_prefix(marker)
+                    && let Some(path) = strip_diff_prefix(rest.trim_end())
+                    && !section.paths.contains(&path)
+                {
+                    section.paths.push(path);
+                }
+            }
+        }
+
+        section.text.push_str(line);
+        section.text.push('\n');
+    }
+
+    sections
+}
+
+/// Truncates `text` to at most `max_bytes`, cutting at a line boundary. Returns the text and
+/// whether anything was dropped.
+fn truncate_to_lines(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_owned(), false);
+    }
+    let mut out = String::new();
+    for line in text.lines() {
+        // +1 for the newline this line will carry.
+        if out.len() + line.len() + 1 > max_bytes {
+            return (out, true);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    (out, false)
+}
+
+/// Reads a pull request's unified diff, optionally narrowed to one file.
+pub async fn get_pull_request_diff(
+    forge: &Forge,
+    params: PullRequestDiffParams,
+) -> Result<CallToolResult, McpError> {
+    let diff = forge
+        .get_pull_request_diff(&params.owner, &params.repo, params.index)
+        .await
+        .map_err(to_mcp)?;
+
+    if let Some(wanted) = params.file_path.as_deref() {
+        let sections = split_diff_sections(&diff);
+        let matched: String = sections
+            .iter()
+            .filter(|s| s.paths.iter().any(|p| p == wanted))
+            .map(|s| s.text.as_str())
+            .collect();
+        if matched.is_empty() {
+            return Err(McpError::invalid_params(
+                format!(
+                    "no file matching {wanted} in this diff — call list_pull_request_files for \
+                     the exact paths this pull request changes (the match is exact, not a glob)"
+                ),
+                None,
+            ));
+        }
+        return json_result(&serde_json::json!({
+            "index": params.index,
+            "file_path": wanted,
+            "bytes": matched.len(),
+            "truncated": false,
+            "diff": matched,
+        }));
+    }
+
+    let max_bytes = params.max_bytes.unwrap_or(DIFF_MAX_BYTES);
+    let (text, truncated) = truncate_to_lines(&diff, max_bytes);
+    let mut out = serde_json::json!({
+        "index": params.index,
+        "bytes": text.len(),
+        "total_bytes": diff.len(),
+        "truncated": truncated,
+        "diff": text,
+    });
+    if truncated && let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "note".to_owned(),
+            Value::String(
+                "diff truncated at the byte cap — call list_pull_request_files, then request one \
+                 file at a time with file_path (or raise max_bytes)"
+                    .to_owned(),
+            ),
+        );
+    }
+    json_result(&out)
 }
 
 // --- write tools (require write mode; see crate::forgejo::server) ---
@@ -1721,5 +2016,195 @@ mod tests {
         assert!(v.get("repository").is_none());
         assert!(v.get("trigger_user").is_none());
         assert!(v.get("event_payload").is_none());
+    }
+
+    // --- bounded file reads ---
+
+    const SAMPLE: &str = "one\ntwo\nthree\nfour\nfive\n";
+
+    #[test]
+    fn no_bounds_returns_the_whole_file_and_no_window() {
+        let (text, window) = slice_lines(SAMPLE, None, None, 5).unwrap();
+        assert_eq!(text, SAMPLE, "unbounded read is byte-identical");
+        assert!(window.is_none(), "no window to report");
+    }
+
+    #[test]
+    fn a_window_slices_and_reports_what_it_applied() {
+        let (text, window) = slice_lines(SAMPLE, Some(2), Some(4), 5).unwrap();
+        assert_eq!(text, "two\nthree\nfour");
+        assert_eq!(window, Some((2, 4)));
+
+        // One bound alone: start-only runs to the end, end-only starts at line 1.
+        let (text, window) = slice_lines(SAMPLE, Some(4), None, 5).unwrap();
+        assert_eq!(text, "four\nfive");
+        assert_eq!(window, Some((4, 5)));
+        let (text, window) = slice_lines(SAMPLE, None, Some(2), 5).unwrap();
+        assert_eq!(text, "one\ntwo");
+        assert_eq!(window, Some((1, 2)));
+    }
+
+    #[test]
+    fn bounds_clamp_to_the_file_rather_than_failing() {
+        // end_line past the end stops at the last line.
+        let (text, window) = slice_lines(SAMPLE, Some(4), Some(999), 5).unwrap();
+        assert_eq!(text, "four\nfive");
+        assert_eq!(window, Some((4, 5)));
+
+        // start_line past the end is empty, not an error — the window says why.
+        let (text, window) = slice_lines(SAMPLE, Some(99), None, 5).unwrap();
+        assert!(text.is_empty());
+        assert_eq!(window, Some((99, 5)));
+
+        // start_line 0 is nonsense in a 1-indexed scheme; treat it as line 1.
+        let (text, _) = slice_lines(SAMPLE, Some(0), Some(1), 5).unwrap();
+        assert_eq!(text, "one");
+    }
+
+    #[test]
+    fn an_inverted_window_is_refused() {
+        let err = slice_lines(SAMPLE, Some(4), Some(2), 5).unwrap_err();
+        assert!(
+            err.to_string().contains("after end_line"),
+            "message names the problem: {err}"
+        );
+    }
+
+    // --- pull request diffs ---
+
+    /// Two files, the second a rename, plus a hunk body containing a line that *looks* like a
+    /// `---` file marker once the diff prefixes a `-` to it.
+    const DIFF: &str = "\
+diff --git a/src/main.rs b/src/main.rs
+index 1111111..2222222 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+--- not a header, just a removed line
++    println!(\"hi\");
+ }
+diff --git a/old/name.rs b/new/name.rs
+similarity index 90%
+rename from old/name.rs
+rename to new/name.rs
+--- a/old/name.rs
++++ b/new/name.rs
+@@ -1 +1 @@
+-old
++new
+";
+
+    #[test]
+    fn diff_splits_into_one_section_per_file() {
+        let sections = split_diff_sections(DIFF);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].text.starts_with("diff --git a/src/main.rs"));
+        assert!(sections[1].text.starts_with("diff --git a/old/name.rs"));
+        // Every line is accounted for — nothing dropped on the floor.
+        let rejoined: String = sections.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(rejoined, DIFF);
+    }
+
+    #[test]
+    fn a_rename_matches_on_either_side() {
+        let sections = split_diff_sections(DIFF);
+        assert!(sections[1].paths.contains(&"old/name.rs".to_owned()));
+        assert!(sections[1].paths.contains(&"new/name.rs".to_owned()));
+    }
+
+    #[test]
+    fn a_removed_line_that_looks_like_a_header_is_not_read_as_one() {
+        let sections = split_diff_sections(DIFF);
+        // "--- not a header, just a removed line" sits inside the hunk; it must not become a path.
+        assert_eq!(
+            sections[0].paths,
+            vec!["src/main.rs".to_owned()],
+            "only the real path, deduped across the a/ and b/ sides"
+        );
+    }
+
+    #[test]
+    fn truncation_cuts_at_a_line_boundary() {
+        let (text, truncated) = truncate_to_lines(SAMPLE, 9);
+        assert!(truncated);
+        assert_eq!(text, "one\ntwo\n", "whole lines only, never a split line");
+
+        let (text, truncated) = truncate_to_lines(SAMPLE, 1024);
+        assert!(!truncated);
+        assert_eq!(text, SAMPLE);
+    }
+
+    #[test]
+    fn changed_files_slim_to_the_review_relevant_fields() {
+        let raw = serde_json::json!([{
+            "filename": "src/main.rs",
+            "status": "changed",
+            "additions": 2,
+            "deletions": 1,
+            "changes": 3,
+            // The three URL fields restate the path; they must not survive.
+            "html_url": "https://codeberg.org/o/r/src/commit/deadbeef/src/main.rs",
+            "contents_url": "https://codeberg.org/api/v1/repos/o/r/contents/src/main.rs",
+            "raw_url": "https://codeberg.org/o/r/raw/commit/deadbeef/src/main.rs"
+        }]);
+        let files: Vec<ChangedFileSummary> = into_items(raw)
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+        assert_eq!(files.len(), 1);
+
+        let v = serde_json::to_value(&files[0]).unwrap();
+        assert_eq!(v["filename"], "src/main.rs");
+        assert_eq!(v["additions"], 2);
+        assert!(v.get("html_url").is_none());
+        assert!(v.get("contents_url").is_none());
+        assert!(v.get("raw_url").is_none());
+        // Absent on a non-rename, and omitted rather than serialized as null.
+        assert!(v.get("previous_filename").is_none());
+    }
+
+    /// A real diff, fetched verbatim from `codeberg.org/api/v1` (`forgejo/forgejo` PR
+    /// 14137, trimmed to the first hunk of each file). Guards the parser against drifting
+    /// away from what Forgejo actually serves — note the context text trailing the `@@`
+    /// header, and the `index` line between the header and the `---` marker.
+    const REAL_DIFF: &str = r"diff --git a/go.mod b/go.mod
+index 9707e6d220..779439f1d5 100644
+--- a/go.mod
++++ b/go.mod
+@@ -262,3 +262,5 @@ replace github.com/mholt/archiver/v3 => code.forgejo.org/forgejo/archiver/v3 v3.
+ replace github.com/gliderlabs/ssh => code.forgejo.org/forgejo/ssh v0.0.0-20241211213324-5fc306ca0616
+ 
+ replace git.sr.ht/~mariusor/go-xsd-duration => code.forgejo.org/forgejo/go-xsd-duration v0.0.0-20220703122237-02e73435a078
++
++replace code.forgejo.org/xorm/xorm => code.forgejo.org/xorm/xorm v1.4.2-0.20260827232307-8552ec01718a
+diff --git a/go.sum b/go.sum
+index cc10f213c2..d3bf724104 100644
+--- a/go.sum
++++ b/go.sum
+@@ -40,8 +40,8 @@ code.forgejo.org/go-chi/captcha v1.0.3 h1:ii3VrlhSJeSyJA2GD/UvjY3tbzGB0ZH/og1ZPV
+ code.forgejo.org/go-chi/captcha v1.0.3/go.mod h1:YXw47044t3pHWdigYyn+NMnccv0Y9h69kDwpMsCO2C4=
+ code.forgejo.org/go-chi/session v1.0.4 h1:WQ1NaVxcCpxYwCliEGypKclZnOCjh3p1fk8XciJc62U=
+ code.forgejo.org/go-chi/session v1.0.4/go.mod h1:+sSTiomM5C8AUPtxZyTENIbcTz22kcVottKO0lnmDRk=
+";
+
+    #[test]
+    fn parses_a_real_forgejo_diff() {
+        let sections = split_diff_sections(REAL_DIFF);
+        assert_eq!(sections.len(), 2, "one section per changed file");
+        assert_eq!(sections[0].paths, vec!["go.mod".to_owned()]);
+        assert_eq!(sections[1].paths, vec!["go.sum".to_owned()]);
+
+        // Selecting one file yields that file's hunks and nothing from its neighbour.
+        let only_mod: String = sections
+            .iter()
+            .filter(|s| s.paths.iter().any(|p| p == "go.mod"))
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(
+            only_mod.contains("+replace code.forgejo.org/xorm/xorm"),
+            "keeps the added line from go.mod"
+        );
+        assert!(!only_mod.contains("go-chi/captcha"), "no bleed from go.sum");
     }
 }

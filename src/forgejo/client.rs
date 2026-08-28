@@ -232,6 +232,43 @@ impl Forge {
             .await
     }
 
+    /// `GET /repos/{owner}/{repo}/pulls/{index}/files` — files changed by a pull request.
+    ///
+    /// Entries carry per-file counts (`additions` / `deletions` / `changes`) and, on a rename,
+    /// `previous_filename` — but **not** the hunks themselves; Forgejo omits the `patch` field
+    /// that GitHub's equivalent returns. Use [`Forge::get_pull_request_diff`] for the content.
+    pub async fn list_pull_request_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.0
+            .get_list(
+                &format!("repos/{owner}/{repo}/pulls/{index}/files"),
+                &paging(page, limit),
+            )
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/pulls/{index}.diff` — the pull request's unified diff.
+    ///
+    /// Serves `text/plain`, not JSON, so it goes through [`RestClient::get_text`]. The sibling
+    /// `.patch` view (same diff wrapped in a mail-formatted commit series) is not exposed: it
+    /// carries author/date headers that add tokens without adding reviewable content.
+    pub async fn get_pull_request_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+    ) -> Result<String, ForgeError> {
+        self.0
+            .get_text(&format!("repos/{owner}/{repo}/pulls/{index}.diff"), &[])
+            .await
+    }
+
     // --- write endpoints ---
 
     /// `POST /user/repos` — create a repository for the authenticated user.

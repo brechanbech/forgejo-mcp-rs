@@ -350,6 +350,45 @@ used: the `Auth` scheme enum (this server is always `Authorization: token`, so t
 hardcoded) and the `post_none` verb. `list_tools` also stopped being an `async fn` — nothing in it
 awaits — which a newer clippy had begun flagging.
 
+### v0.19 — bounded reads: file windows and pull-request diffs
+
+Three additions, all in service of one property: **a read tool should never be able to dump an
+unbounded amount of text into the model's context.** The existing list tools already had this via
+`gather_all`'s item cap; file reads and diffs did not.
+
+| Tool | | Endpoint |
+|---|---|---|
+| `list_pull_request_files` | read | `GET /repos/{owner}/{repo}/pulls/{index}/files` |
+| `get_pull_request_diff` | read | `GET /repos/{owner}/{repo}/pulls/{index}.diff` |
+
+**`get_file_contents` gained a line window.** Optional `start_line` / `end_line` are 1-indexed and
+inclusive, and `total_lines` is now always reported so a caller can page through a large file
+rather than pulling it whole. Bounds **clamp** rather than fail: an `end_line` past the end stops
+at the last line, and a `start_line` past the end returns an empty slice with the window echoed —
+the file genuinely has no such line, and saying so is more useful than an error. Only an inverted
+window (`start_line` after `end_line`) is rejected, since nothing could satisfy it. The slice is
+re-joined with `\n`, so CRLF files come back normalized.
+
+**Diffs are a two-step read.** `list_pull_request_files` gives the changed paths with per-file
+counts; `get_pull_request_diff` then returns hunks. Passing `file_path` narrows to a single file
+and is the intended path for review work. Without it, the whole diff is truncated at 64 KiB
+(`max_bytes` overrides) at a line boundary, flagged `truncated`, with a note naming
+`list_pull_request_files` — the same "cap and say so" contract `gather_all` uses.
+
+**Two API facts drove the shape.** Forgejo's `/files` endpoint does **not** carry the `patch`
+field GitHub's equivalent returns, so the file list cannot supply hunks and a second call is
+unavoidable — this is not a design preference. And `.diff` serves `text/plain`, not JSON, which is
+why `mcp_core` grew [`RestClient::get_text`]; `request()` was split into a raw `send()` plus a JSON
+parse on top, leaving every existing verb unchanged.
+
+**Matching a file inside a diff.** `file_path` matches exactly (no globs) against either side of a
+rename, so a caller need not know whether they hold the pre- or post-rename name. Paths are
+harvested from the `diff --git` header *and* the `---` / `+++` markers, but only from the lines
+before the first `@@`: inside a hunk, a removed line whose content starts with `-- ` is rendered as
+`--- `, and would otherwise be misread as a file header. Both that trap and a real Codeberg diff
+are covered by unit tests; the real-diff fixture is fetched output, not hand-written, so the parser
+is pinned to what Forgejo actually serves.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -376,8 +415,14 @@ a real client) so slow responses can return.
   server touches, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
-- No webhooks or admin tooling. CI control is limited to `dispatch_workflow` — with **no log or
-  artifact retrieval**, as Forgejo exposes no repo-level endpoint for it.
+- No webhooks or admin tooling. CI control is limited to `dispatch_workflow`, and **logs and
+  artifacts are not retrieved** — but note the reason has changed. This was justified by "Forgejo
+  exposes no repo-level endpoint for it", which is no longer accurate: Forgejo v16 serves per-job
+  logs, and `goern/forgejo-mcp` reads them bounded and resumable (`offset` + `max_bytes`,
+  defaulting to the tail) after enumerating a run's jobs — the run-wide ZIP endpoint is the one
+  with no `Range` support. So the real objection was only ever to *unbounded* logs, and that is
+  solvable. Reading a failed job's tail is a candidate, not an impossibility. Unverified here
+  against a live v16 instance.
 
 ### CI status: dropped via commit-status, later solved via the Actions-runs API (v0.12.0)
 
@@ -435,4 +480,8 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
    instance. *(done)*
 8. **v0.18.0** — the Woodpecker server moved out to its own repository and crate; this crate is a
    single binary again. *(done)*
-9. Later — issue/PR writes, sort filters, and slimming what still passes through raw.
+9. **v0.19.0** — bounded reads: a line window on `get_file_contents`, plus
+   `list_pull_request_files` and `get_pull_request_diff` for reviewing a change without pulling the
+   whole diff. *(done)*
+10. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
+    Non-goals), and slimming what still passes through raw.

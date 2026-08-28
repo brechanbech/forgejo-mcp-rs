@@ -8,6 +8,49 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.19.0] — 2026-08-28
+
+Bounded reads. Every read tool should be incapable of dumping unbounded text into a model's
+context; the list tools already were, via the auto-paginator's item cap. File reads and diffs
+were not.
+
+### Added
+
+- **`start_line` / `end_line` on `get_file_contents`** — a 1-indexed, inclusive line window, with
+  `total_lines` now always reported so a caller can page through a large file instead of pulling
+  it whole. Bounds clamp rather than fail: `end_line` past the end stops at the last line, and a
+  `start_line` past the end returns an empty slice with the window echoed. Only an inverted
+  window (`start_line` after `end_line`) is an error.
+- **`list_pull_request_files`** — the files a pull request changes, with `additions` /
+  `deletions` / `changes` and `previous_filename` on a rename. Forgejo's three per-file URL
+  fields are dropped.
+- **`get_pull_request_diff`** — a pull request's unified diff. `file_path` narrows it to one
+  file, matching either side of a rename, which is the intended path for review work. Without it
+  the whole diff is truncated at 64 KiB (`max_bytes` overrides) at a line boundary and flagged
+  `truncated`, with a note naming `list_pull_request_files`.
+- `RestClient::get_text` — Forgejo serves `.diff` as `text/plain`, not JSON. `request()` was
+  split into a raw `send()` plus a JSON parse layered on it; the existing verbs are unchanged.
+
+### Changed
+
+- The Non-goals entry on CI logs was **factually wrong** and has been corrected. It claimed
+  "Forgejo exposes no repo-level endpoint" for logs; Forgejo v16 does serve per-job logs, and
+  they can be read bounded and resumable. The real objection was only ever to *unbounded* logs.
+  Still not implemented, but now recorded as a candidate rather than an impossibility.
+
+### Notes
+
+- Forgejo's `/pulls/{index}/files` does **not** return the `patch` field GitHub's equivalent
+  does, so the file list cannot carry hunks and the second call to `get_pull_request_diff` is
+  unavoidable rather than a design choice. Verified against `codeberg.org/api/v1`.
+- The diff parser only scans for `---` / `+++` path markers *before* the first `@@`. Inside a
+  hunk, a removed line whose content begins with `-- ` is rendered as `--- ` and would otherwise
+  be misread as a file header. Covered by a unit test, alongside a fixture of real fetched
+  Codeberg diff output.
+- The new tools were exercised by unit tests and an stdio smoke test of tool registration; the
+  live `/files` and `.diff` round-trips were probed directly against `codeberg.org/api/v1`, but
+  not yet end-to-end through the server with a real token.
+
 ## [0.18.0] — 2026-08-22
 
 ### Removed

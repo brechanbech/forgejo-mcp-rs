@@ -96,15 +96,18 @@ impl RestClient {
         })
     }
 
-    /// Performs one request and returns `(parsed body, total-count header)`. The body is
-    /// `None` only when the response is empty (e.g. a `204` from a delete).
-    async fn request(
+    /// Performs one request and returns `(status-checked body bytes, total-count header)`.
+    ///
+    /// `accept` is the `Accept` header to send — JSON for the API proper, `text/plain` for the
+    /// endpoints that serve a raw document (e.g. a pull request's `.diff`).
+    async fn send(
         &self,
         method: Method,
         path: &str,
         query: &[(&str, String)],
         body: Option<&Value>,
-    ) -> Result<(Option<Value>, Option<usize>), ApiError> {
+        accept: &'static str,
+    ) -> Result<(Vec<u8>, Option<usize>), ApiError> {
         let url = self
             .api_root
             .join(path)
@@ -120,7 +123,7 @@ impl RestClient {
             .http
             .request(method, url)
             .header(AUTHORIZATION, auth)
-            .header(ACCEPT, "application/json");
+            .header(ACCEPT, accept);
         if !query.is_empty() {
             req = req.query(query);
         }
@@ -141,6 +144,21 @@ impl RestClient {
             let body = String::from_utf8_lossy(&bytes).into_owned();
             return Err(ApiError::Status { code: status, body });
         }
+        Ok((bytes.to_vec(), total))
+    }
+
+    /// Performs one JSON request and returns `(parsed body, total-count header)`. The body is
+    /// `None` only when the response is empty (e.g. a `204` from a delete).
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<(Option<Value>, Option<usize>), ApiError> {
+        let (bytes, total) = self
+            .send(method, path, query, body, "application/json")
+            .await?;
         let value = if bytes.is_empty() {
             None
         } else {
@@ -148,7 +166,6 @@ impl RestClient {
         };
         Ok((value, total))
     }
-
     /// `GET` returning a single JSON value (object or array). Empty bodies become `Null`.
     ///
     /// # Errors
@@ -172,6 +189,20 @@ impl RestClient {
     ) -> Result<(Value, Option<usize>), ApiError> {
         let (value, total) = self.request(Method::GET, path, query, None).await?;
         Ok((value.unwrap_or_else(|| Value::Array(Vec::new())), total))
+    }
+
+    /// `GET` of an endpoint that serves a raw text document rather than JSON — Forgejo's
+    /// `.diff` / `.patch` pull-request views. Returns the body decoded as UTF-8.
+    ///
+    /// # Errors
+    /// Propagates transport and non-2xx ([`ApiError::Status`]) failures, and reports a body that
+    /// isn't valid UTF-8 as [`ApiError::Config`].
+    pub async fn get_text(&self, path: &str, query: &[(&str, String)]) -> Result<String, ApiError> {
+        let (bytes, _) = self
+            .send(Method::GET, path, query, None, "text/plain")
+            .await?;
+        String::from_utf8(bytes)
+            .map_err(|e| ApiError::Config(format!("response was not valid UTF-8: {e}")))
     }
 
     /// `POST` of a JSON body returning the created resource.
