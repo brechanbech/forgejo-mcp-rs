@@ -47,9 +47,12 @@ were not.
   hunk, a removed line whose content begins with `-- ` is rendered as `--- ` and would otherwise
   be misread as a file header. Covered by a unit test, alongside a fixture of real fetched
   Codeberg diff output.
-- The new tools were exercised by unit tests and an stdio smoke test of tool registration; the
-  live `/files` and `.diff` round-trips were probed directly against `codeberg.org/api/v1`, but
-  not yet end-to-end through the server with a real token.
+- Verified end-to-end through the server against live Codeberg: file counts and rename metadata
+  match the raw API, file-scoped diffs carry no bleed from neighbouring files, truncation lands on
+  a line boundary with an exact `total_bytes`, and the line window clamps and errors as specified.
+  The rename match was confirmed on **both** sides of a pure rename (`forgejo/forgejo` PR 13957),
+  which is the case with no `---`/`+++` markers at all — so it exercises the `diff --git` header
+  parse on its own.
 
 ## [0.18.0] — 2026-08-22
 
