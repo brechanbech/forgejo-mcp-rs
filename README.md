@@ -3,9 +3,10 @@
 [![CI](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions)
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for
-[Forgejo](https://forgejo.org/) and [Codeberg](https://codeberg.org). It lets
-an MCP client (Claude Code, Claude Desktop, …) read your forge — the authenticated user,
-repositories, issues, and pull requests — over the Forgejo REST API.
+[Forgejo](https://forgejo.org/), [Codeberg](https://codeberg.org) and
+[Gitea](https://about.gitea.com/). It lets an MCP client (Claude Code, Claude Desktop, …)
+read your forge — the authenticated user, repositories, issues, and pull requests — over the
+Forgejo/Gitea REST API.
 
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
 > the forge — user, repos, issues, pull requests, search, orgs, notifications, comments,
@@ -55,6 +56,7 @@ The server is configured by environment variables:
 | `FORGEJO_MIRROR_TOKEN` | no | — | Credential `add_push_mirror` sends as the remote's password (e.g. a GitHub PAT). Kept out of the conversation — never passed as a tool argument. Omit if you only use `use_ssh=true` mirrors. |
 | `FORGEJO_MIGRATE_TOKEN` | no | — | Credential `migrate_repo` sends to the **source** instance it reads from. Also never passed as a tool argument. Kept separate from `FORGEJO_MIRROR_TOKEN` on purpose — that one authenticates to a push *target*, so sharing a variable would send a credential to a host it was never issued for. Omit if you only migrate public repos. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
+| `FORGEJO_FLAVOR` | no | `auto` | `forgejo`, `gitea`, or `auto` to detect from the instance version. Only the Actions (CI) tools consult it — see [Forgejo and Gitea](#forgejo-and-gitea). |
 
 Mint a token at **Codeberg → Settings → Applications** (or your instance's equivalent). For
 the read tools, read scopes (`read:repository`, `read:issue`, `read:user`) suffice. The write
@@ -69,6 +71,51 @@ reusing the write token for reads.
 > unaffected, but if you mint a *repository-scoped* token it must actually carry the scopes
 > above — in particular the repo-admin scope for the push-mirror tools, which otherwise return
 > `403`. Scope the token to every repo you intend to reach.
+
+### Forgejo and Gitea
+
+Forgejo began as a Gitea fork, and the REST surface is still very nearly the same one. Of the
+~25 endpoints this server calls, **only the Actions (CI) ones differ.** Issues, pull requests,
+diffs, PR files, branches, file contents, search, orgs, notifications, push mirrors, and
+migration are identical in path, method, and response shape on both, so they need no special
+handling and get none.
+
+The flavor is detected once, lazily, from the instance's `GET /version` — and only the Actions
+tools ever ask. Set `FORGEJO_FLAVOR` to `forgejo` or `gitea` to pin it if the detection ever
+guesses wrong on your instance.
+
+> The detection reads oddly on purpose: **Forgejo names Gitea in its own version string**
+> (Codeberg reports `16.0.0-dev-741-6f391573+gitea-1.22.0`) to advertise API compatibility,
+> while Gitea never names itself (`1.27.0+dev-954-g1f3981a301`). So a `gitea-` marker means
+> Forgejo. Failing that marker, the major version decides: Gitea is still 1.x, Forgejo
+> renumbered to 7 and beyond.
+
+Where the two forges differ, and what the server does about it:
+
+| | Forgejo | Gitea | Handling |
+|---|---|---|---|
+| Run filter by git ref | `ref`, fully qualified | `branch`, bare name | Translated; `refs/heads/main` works on both |
+| Run filter by workflow | `workflow_id` query parameter | a separate `…/actions/workflows/{file}/runs` path | Translated |
+| Run outcome | `status` alone | `status` (phase) plus `conclusion` | Normalized: `conclusion` is promoted into `status`, and also kept verbatim |
+| Run field names | `commit_sha`, `prettyref`, `index_in_repo`, `title`, `created` | `head_sha`, `head_branch`, `run_number`, `display_title`, `created_at` | Normalized to one shape |
+| Workflow file and ref | separate: `workflow_id` and `prettyref` | combined into `path`, as `ci.yml@refs/heads/main` | Split apart; the ref is shortened (`main`, `v0.16.0`) and a pull-request ref kept whole |
+| Unknown workflow filter | empty list | `404 workflow "x.yml" not found` | Surfaced as-is; the tool description says which is which |
+| `workflow_dispatch` reply | the created run (`return_run_info`) | `204 No Content` | Forgejo's run is passed through; on Gitea the tool returns an acknowledgement and tells the caller to find the run with `list_workflow_runs` |
+| Workflow directory | `.forgejo/workflows`, `.github/workflows` | `.gitea/workflows`, `.github/workflows` | Mentioned in the `dispatch_workflow` tool description |
+
+Translating rather than sending both spellings is deliberate: an unknown query parameter is
+*ignored*, not rejected, so sending Forgejo's `ref` to Gitea would silently return **unfiltered**
+runs — a filter that looks applied but isn't.
+
+Gitea's `path` deserves its own warning, because the name lies: it is **not** a filesystem
+path. It is the workflow file, an `@`, and the fully-qualified ref — `ci.yml@refs/heads/main`,
+or `test-pr.yml@refs/pull/1117/head`. It is also the only reliable source of the ref, since
+`head_branch` is populated for branch runs and null for tags and pull requests.
+
+Two more things regardless of flavor. Gitea requires a token for the Actions API even on public
+repositories. And `get_workflow_run` deliberately returns the instance's full, unmodified run
+object, so that one *is* shaped differently on each forge; use `list_workflow_runs` when you
+want the normalized view.
 
 ### Write mode
 
@@ -130,6 +177,20 @@ claude mcp add --scope user forgejo /path/to/target/release/forgejo-mcp-rs \
 }
 ```
 
+Point `FORGEJO_URL` at a Gitea instance and everything works the same way — the flavor is
+detected for you:
+
+```json
+{
+  "mcpServers": {
+    "gitea": {
+      "command": "/path/to/target/release/forgejo-mcp-rs",
+      "env": { "FORGEJO_URL": "https://gitea.com", "FORGEJO_TOKEN_READ_ONLY": "your_read_token_here" }
+    }
+  }
+}
+```
+
 Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUST_LOG`, e.g.
 `RUST_LOG=forgejo_mcp_rs=debug`.
 
@@ -138,7 +199,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | Tool |  | Notes |
 |---|---|---|
 | `whoami` | read | The authenticated user (verifies the token) |
-| `version` | read | This MCP server's version + the connected Forgejo instance's version |
+| `version` | read | This MCP server's version, the connected instance's version, and its `flavor` (`forgejo` or `gitea`) |
 | `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
 | `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default) |
 | `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default) |
@@ -152,7 +213,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
 | `list_pull_request_files` | read | Files a PR changes (auto-paginated), with per-file additions/deletions and rename info. Forgejo omits the hunks here — use `get_pull_request_diff` for content |
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
-| `list_workflow_runs` | read | Forgejo Actions (CI) runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` (no separate conclusion) |
+| `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
 | `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
@@ -168,7 +229,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
 | `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
 | `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
-| `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run |
+| `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run on Forgejo, an acknowledgement on Gitea |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole

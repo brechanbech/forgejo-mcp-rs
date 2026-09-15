@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.brechanbech/forgejo-mcp-rs",
-  "title": "Forgejo / Codeberg",
-  "description": "Model Context Protocol server for Forgejo / Codeberg, in Rust",
-  "version": "0.19.0",
+  "title": "Forgejo / Codeberg / Gitea",
+  "description": "Model Context Protocol server for Forgejo, Codeberg and Gitea, in Rust",
+  "version": "0.20.0",
   "websiteUrl": "https://codeberg.org/brechanbech/forgejo-mcp-rs",
   "repository": {
     "url": "https://github.com/brechanbech/forgejo-mcp-rs",
@@ -13,7 +13,7 @@
     {
       "registryType": "cargo",
       "identifier": "forgejo-mcp-rs",
-      "version": "0.19.0",
+      "version": "0.20.0",
       "transport": {
         "type": "stdio"
       }

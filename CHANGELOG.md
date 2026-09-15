@@ -8,6 +8,79 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.20.0] — 2026-09-15
+
+Gitea support. The server now talks to Gitea as well as Forgejo and Codeberg, from one binary,
+with the flavor detected automatically.
+
+Almost nothing had to change to get there: of the ~25 endpoints this server calls, only the
+Actions (CI) ones differ between the two forges. Issues, pull requests, diffs, PR files,
+branches, contents, search, orgs, notifications, push mirrors, and migration are identical in
+path, method, and response shape, and were already working against Gitea untested.
+
+### Added
+
+- **Automatic flavor detection.** The instance is classified once, lazily, from `GET /version`,
+  and only the Actions tools consult the result. Detection never fails the request: an
+  unreachable instance falls back to Forgejo and is not cached, so a later call retries rather
+  than living with a guess made during an outage.
+- **`FORGEJO_FLAVOR`** — `forgejo`, `gitea`, or `auto` (the default) to pin the flavor when
+  detection guesses wrong. An unrecognized value fails startup with a message naming the
+  accepted ones, rather than being silently ignored.
+- **`flavor` in the `version` tool's output**, so a client can see which forge it reached.
+
+### Changed
+
+- **`list_workflow_runs` normalizes both forges onto one run shape.** Gitea copied GitHub's
+  vocabulary and Forgejo kept its own, so `head_sha`/`commit_sha`, `head_branch`/`prettyref`,
+  `run_number`/`index_in_repo`, `display_title`/`title` and `created_at`/`created` are folded
+  into one set of field names. Gitea's `conclusion` is promoted into `status` — where Forgejo
+  already puts the outcome — and kept verbatim alongside it, so "did this run pass?" is the
+  same question on both.
+- **Run summary field names changed** as a consequence: `index_in_repo` → `run_number`,
+  `prettyref` → `ref`, `workflow_id` → `workflow`, and a `conclusion` field appears on Gitea.
+  Forgejo's `commit_sha`, `title`, `status`, `created`, `started` and `stopped` keep their
+  names. This is the breaking part of the release.
+- **`version` tool: `forgejo` → `instance_version`.** The old key was simply wrong on a Gitea
+  instance.
+- **Run filters are translated per flavor.** Forgejo's `ref` (fully qualified) becomes Gitea's
+  `branch` (bare), and a workflow filter moves from Forgejo's `workflow_id` query parameter to
+  Gitea's separate `…/actions/workflows/{file}/runs` path. Translating matters because an
+  unknown query parameter is ignored rather than rejected — sending Forgejo's spelling to Gitea
+  would have silently returned *unfiltered* runs.
+- **`dispatch_workflow` adapts to the reply.** `return_run_info` is a Forgejo extension, so it
+  is omitted on Gitea, which answers `204 No Content`; the tool then returns an acknowledgement
+  naming the workflow and ref, and points the caller at `list_workflow_runs` to find the run.
+- Tool descriptions and the server's instructions no longer claim Forgejo-only facts, in
+  particular that a run has no `conclusion` field.
+
+### Security
+
+- **rustls 0.23.41 → 0.23.45** (lockfile only), clearing RUSTSEC-2026-0285: TLS 1.3 handshake
+  messages were accepted across encryption-level boundaries. Unrelated to the Gitea work, but
+  it was failing `cargo deny` on the branch.
+
+### Notes
+
+- **Gitea's `path` is not a filesystem path.** It is `ci.yml@refs/heads/main` — the workflow
+  file, an `@`, and the ref — and it is the only reliable source of the ref, because
+  `head_branch` is null for tag and pull-request runs. Reading it as a path (an early version of
+  this release did) reported the workflow as `head`. Caught by live testing, not by the specs.
+- **An unknown `workflow_id` behaves differently per forge**: Forgejo returns an empty list,
+  Gitea returns `404 workflow "x.yml" not found`, because the filter is a path segment there.
+  The tool description now distinguishes that from the 404 that means Actions is disabled.
+- `get_workflow_run` still returns the instance's full, unmodified run object, so it remains
+  shaped differently on each forge by design. `list_workflow_runs` is the normalized view.
+- Gitea requires a token for the Actions API even on public repositories.
+- **Verified live against `gitea.com`** with a read-only token: flavor detection, the
+  `FORGEJO_FLAVOR` override, startup rejection of a bad override, the whole read surface
+  against a private repo, and `list_workflow_runs` / `get_workflow_run` against a public repo
+  with 864 real runs — unfiltered and filtered by `workflow_id`, `ref`, `status` and
+  `head_sha`, across branch, tag and pull-request runs.
+- **`dispatch_workflow` on Gitea is still unverified**: testing it means triggering CI on a repo
+  one does not own. See [`SPECIFICATION.md`](SPECIFICATION.md) for exactly what that leaves
+  unproven.
+
 ## [0.19.0] — 2026-08-28
 
 Bounded reads. Every read tool should be incapable of dumping unbounded text into a model's

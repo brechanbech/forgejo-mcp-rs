@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::client::Forge;
+use super::client::{Forge, RunFilters};
 
 /// Returns the authenticated user — proof the token works.
 pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
@@ -27,13 +27,15 @@ pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
     json_result(&user)
 }
 
-/// Reports this MCP server's own version plus the Forgejo instance version it talks to.
+/// Reports this MCP server's own version plus the version and flavor of the instance it talks
+/// to.
 ///
 /// The MCP-server version is compiled in (no network), so it's reported even if the instance
-/// call fails — in which case `forgejo` carries the error text instead of a version string.
+/// call fails — in which case `instance_version` carries the error text instead of a version
+/// string, and `flavor` falls back to `forgejo`.
 pub async fn version(forge: &Forge) -> Result<CallToolResult, McpError> {
     let mcp_server = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
-    let forgejo = match forge.server_version().await {
+    let instance = match forge.server_version().await {
         Ok(value) => value
             .get("version")
             .and_then(Value::as_str)
@@ -42,7 +44,8 @@ pub async fn version(forge: &Forge) -> Result<CallToolResult, McpError> {
     };
     json_result(&serde_json::json!({
         "mcp_server": mcp_server,
-        "forgejo": forgejo,
+        "instance_version": instance,
+        "flavor": forge.flavor().await.as_str(),
         "url": forge.base_url(),
     }))
 }
@@ -1691,74 +1694,179 @@ pub struct ListWorkflowRunsParams {
     pub limit: Option<u32>,
 }
 
-/// A slimmed workflow run — the fields worth surfacing from a verbose `ActionRun`. All-optional
-/// so a well-formed run never fails to deserialize. Note there is no `conclusion` field: the
-/// terminal outcome (success/failure/…) lives in `status`.
-#[derive(Debug, Serialize, serde::Deserialize)]
+/// A slimmed workflow run, in one shape regardless of which forge produced it.
+///
+/// Forgejo and Gitea model a run differently — Gitea copied GitHub's vocabulary, Forgejo kept
+/// its own — so this is the union, filled from whichever spelling the instance used. Every
+/// field is optional: a run missing one is reported without it rather than dropped.
+#[derive(Debug, Serialize, PartialEq, Eq)]
 struct RunSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<i64>,
+    /// Per-repository run counter — Forgejo's `index_in_repo`, Gitea's `run_number`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    index_in_repo: Option<i64>,
+    run_number: Option<i64>,
+    /// Forgejo's `title`, Gitea's `display_title`.
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    /// The run's outcome where it has one, else how far it has got. On Gitea, whose `status`
+    /// only says `queued`/`in_progress`/`completed`, the terminal `conclusion` is promoted
+    /// into this field so the same question can be asked of either forge.
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
+    /// Gitea's raw `conclusion`, kept alongside `status` for callers that want the
+    /// distinction. Never present on Forgejo, which has no such field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conclusion: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     event: Option<String>,
+    /// Workflow file name — Forgejo's `workflow_id`, or the basename of Gitea's `path`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    workflow_id: Option<String>,
+    workflow: Option<String>,
+    /// Forgejo's `commit_sha`, Gitea's `head_sha`.
     #[serde(skip_serializing_if = "Option::is_none")]
     commit_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prettyref: Option<String>,
+    /// Forgejo's `prettyref`, Gitea's `head_branch`.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    git_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     html_url: Option<String>,
+    /// Forgejo's `created`, Gitea's `created_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     created: Option<String>,
+    /// Forgejo's `started`, Gitea's `started_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     started: Option<String>,
+    /// Forgejo's `stopped`, Gitea's `completed_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     stopped: Option<String>,
 }
 
-/// Projects raw workflow-run objects down to [`RunSummary`], skipping any that don't fit.
-fn slim_runs(items: Vec<Value>) -> Vec<RunSummary> {
+/// Reads the first of `keys` that holds a non-empty string.
+///
+/// Both forges emit `""` for "not set yet" on the timestamp and conclusion fields, so an empty
+/// string has to count as absent — otherwise a queued run reports a blank conclusion and
+/// `status` would be overwritten with nothing.
+fn first_str(run: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| run.get(*k).and_then(Value::as_str))
+        .find(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Reads the first of `keys` that holds an integer.
+fn first_i64(run: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|k| run.get(*k)?.as_i64())
+}
+
+/// Projects one raw workflow run — Forgejo's or Gitea's — onto [`RunSummary`].
+///
+/// Allow-listing the fields is what keeps the verbose parts out: the embedded `repository`
+/// object, the whole `event_payload`, and `trigger_user`, which carries an email address.
+fn normalize_run(run: &Value) -> RunSummary {
+    let conclusion = first_str(run, &["conclusion"]);
+    // Gitea packs both the workflow file and the ref into one `path` field; Forgejo reports
+    // them separately as `workflow_id` and `prettyref`.
+    let gitea_path = first_str(run, &["path"]);
+    let (path_workflow, path_ref) = gitea_path.as_deref().map_or((None, None), |p| {
+        let (workflow, git_ref) = split_gitea_path(p);
+        (
+            Some(workflow_basename(workflow)),
+            git_ref.map(|r| pretty_ref(r).to_owned()),
+        )
+    });
+    RunSummary {
+        id: first_i64(run, &["id"]),
+        run_number: first_i64(run, &["index_in_repo", "run_number"]),
+        title: first_str(run, &["title", "display_title"]),
+        // Gitea's `conclusion` is the outcome and its `status` merely the phase, so prefer the
+        // conclusion once there is one. Forgejo has no conclusion and its `status` is already
+        // the outcome.
+        status: conclusion.clone().or_else(|| first_str(run, &["status"])),
+        conclusion,
+        event: first_str(run, &["event"]),
+        workflow: first_str(run, &["workflow_id"]).or(path_workflow),
+        commit_sha: first_str(run, &["commit_sha", "head_sha"]),
+        // `head_branch` is populated only for branch runs — it is null for tags and pull
+        // requests — so the ref embedded in `path` is the reliable fallback.
+        git_ref: first_str(run, &["prettyref", "head_branch"]).or(path_ref),
+        html_url: first_str(run, &["html_url"]),
+        created: first_str(run, &["created", "created_at"]),
+        started: first_str(run, &["started", "started_at"]),
+        stopped: first_str(run, &["stopped", "completed_at"]),
+    }
+}
+
+/// Splits Gitea's workflow `path` into its file name and the ref the run was for.
+///
+/// Despite the name, this is not a filesystem path: Gitea reports
+/// `test-pr.yml@refs/pull/1117/head`, or `release-nightly.yml@refs/heads/main` for a branch
+/// run — the workflow file, an `@`, and the fully-qualified ref. Confirmed against live runs on
+/// `gitea.com`; reading it as a path yields `head` as the "workflow", which is what the first
+/// live probe of this code returned.
+fn split_gitea_path(path: &str) -> (&str, Option<&str>) {
+    match path.split_once('@') {
+        Some((workflow, git_ref)) => (workflow, Some(git_ref)),
+        None => (path, None),
+    }
+}
+
+/// Shortens a fully-qualified ref to the form Forgejo's `prettyref` reports — `refs/heads/main`
+/// and `refs/tags/v1.0` become `main` and `v1.0`.
+///
+/// A pull-request ref (`refs/pull/1117/head`) has no short form and is left whole, which at
+/// least says plainly that the run belonged to a pull request.
+fn pretty_ref(git_ref: &str) -> &str {
+    git_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| git_ref.strip_prefix("refs/tags/"))
+        .unwrap_or(git_ref)
+}
+
+/// Reduces a workflow file reference to its bare name. Gitea reports `ci.yml` directly, but
+/// this keeps a directory-prefixed value from leaking through if that ever changes.
+fn workflow_basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+/// Projects raw workflow-run objects down to [`RunSummary`], skipping any that aren't objects.
+fn slim_runs(items: &[Value]) -> Vec<RunSummary> {
     items
-        .into_iter()
-        .filter_map(|v| serde_json::from_value(v).ok())
+        .iter()
+        .filter(|v| v.is_object())
+        .map(normalize_run)
         .collect()
 }
 
 /// Lists workflow runs in `owner/repo`, optionally filtered.
 ///
 /// The endpoint returns a `{ workflow_runs, total_count }` wrapper with no `X-Total-Count`
-/// header (confirmed against the live API), so this unwraps the body like `search_repos`
-/// rather than auto-paginating via `gather_all`. A `404` from Forgejo here usually means the
-/// repository has Actions disabled, not that there are no runs.
+/// header (confirmed against the live Forgejo API), so this unwraps the body like
+/// `search_repos` rather than auto-paginating via `gather_all`. Both forges use that wrapper;
+/// the runs inside it differ, which [`normalize_run`] reconciles.
+///
+/// A `404` usually means the repository has Actions disabled, not that there are no runs —
+/// with one Gitea-only exception: because a workflow filter becomes a path segment there, an
+/// unknown `workflow_id` also 404s (`workflow "ci.yml" not found`), where Forgejo returns an
+/// empty list. Both confirmed live.
 pub async fn list_workflow_runs(
     forge: &Forge,
     params: ListWorkflowRunsParams,
 ) -> Result<CallToolResult, McpError> {
-    let mut filters: Vec<(&'static str, String)> = Vec::new();
-    for (key, value) in [
-        ("head_sha", &params.head_sha),
-        ("ref", &params.git_ref),
-        ("status", &params.status),
-        ("event", &params.event),
-        ("workflow_id", &params.workflow_id),
-    ] {
-        if let Some(value) = value {
-            filters.push((key, value.clone()));
-        }
-    }
+    let filters = RunFilters {
+        head_sha: params.head_sha,
+        git_ref: params.git_ref,
+        status: params.status,
+        event: params.event,
+        workflow: params.workflow_id,
+    };
     let body = forge
         .list_workflow_runs(
             &params.owner,
             &params.repo,
+            &filters,
             params.page,
             params.limit,
-            &filters,
         )
         .await
         .map_err(to_mcp)?;
@@ -1771,7 +1879,7 @@ pub async fn list_workflow_runs(
         ),
         _ => (Vec::new(), None),
     };
-    paged_result(params.page, params.limit, total, &slim_runs(items))
+    paged_result(params.page, params.limit, total, &slim_runs(&items))
 }
 
 /// Gets one workflow run by id (full object, not slimmed).
@@ -1790,10 +1898,10 @@ pub struct DispatchWorkflowParams {
     pub owner: String,
     /// Repository name.
     pub repo: String,
-    /// Workflow file name as it appears in `.forgejo/workflows/` or `.github/workflows/`,
-    /// e.g. `ci.yml`. There is no list-workflows API — read the directory with
-    /// `get_file_contents` if you don't know it. The workflow must declare an
-    /// `on: workflow_dispatch` trigger.
+    /// Workflow file name as it appears in `.forgejo/workflows/`, `.gitea/workflows/` or
+    /// `.github/workflows/`, e.g. `ci.yml`. This server exposes no list-workflows tool
+    /// (Forgejo has no such endpoint) — read the directory with `get_file_contents` if you
+    /// don't know the name. The workflow must declare an `on: workflow_dispatch` trigger.
     pub workflow: String,
     /// Git ref to run on — a branch or tag, e.g. `main`.
     #[serde(rename = "ref")]
@@ -1803,26 +1911,35 @@ pub struct DispatchWorkflowParams {
     pub inputs: Option<serde_json::Map<String, Value>>,
 }
 
-/// Triggers a `workflow_dispatch` run and returns the created run (`return_run_info`).
+/// Triggers a `workflow_dispatch` run.
+///
+/// Forgejo answers with the run it created (via its `return_run_info` extension) and that is
+/// passed straight through. Gitea answers `204 No Content`, so there is nothing to return but
+/// the acknowledgement — hence the synthesized object, which says plainly that the run was
+/// accepted and that finding it means listing runs.
 pub async fn dispatch_workflow(
     forge: &Forge,
     params: DispatchWorkflowParams,
 ) -> Result<CallToolResult, McpError> {
-    let mut body = serde_json::Map::new();
-    body.insert("ref".to_owned(), Value::String(params.git_ref));
-    body.insert("return_run_info".to_owned(), Value::Bool(true));
-    if let Some(inputs) = params.inputs {
-        body.insert("inputs".to_owned(), Value::Object(inputs));
-    }
     let run = forge
         .dispatch_workflow(
             &params.owner,
             &params.repo,
             &params.workflow,
-            &Value::Object(body),
+            &params.git_ref,
+            params.inputs,
         )
         .await
         .map_err(to_mcp)?;
+    if run.is_null() {
+        return json_result(&serde_json::json!({
+            "dispatched": true,
+            "workflow": params.workflow,
+            "ref": params.git_ref,
+            "note": "The instance accepted the dispatch but returned no run details. \
+                     Call list_workflow_runs with this workflow and ref to find the run.",
+        }));
+    }
     json_result(&run)
 }
 
@@ -1999,7 +2116,7 @@ mod tests {
     }
 
     #[test]
-    fn slim_runs_keeps_summary_fields_and_drops_the_rest() {
+    fn a_forgejo_run_normalizes_and_drops_the_verbose_fields() {
         let raw = vec![serde_json::json!({
             "id": 42,
             "index_in_repo": 7,
@@ -2018,18 +2135,133 @@ mod tests {
             "trigger_user": { "login": "brechanbech", "email": "person@example.com" },
             "event_payload": "{...large json...}"
         })];
-        let slim = slim_runs(raw);
+        let slim = slim_runs(&raw);
         assert_eq!(slim.len(), 1);
 
         let v = serde_json::to_value(&slim[0]).unwrap();
         assert_eq!(v["id"], 42);
+        assert_eq!(v["run_number"], 7);
         assert_eq!(v["status"], "success");
-        assert_eq!(v["workflow_id"], "ci.yml");
-        assert_eq!(v["prettyref"], "main");
+        assert_eq!(v["workflow"], "ci.yml");
+        assert_eq!(v["ref"], "main");
+        assert_eq!(v["commit_sha"], "deadbeef");
+        assert_eq!(v["created"], "2026-07-06T00:00:00Z");
+        assert_eq!(v["stopped"], "2026-07-06T00:01:00Z");
+        // Forgejo has no conclusion field, so none is invented.
+        assert!(v.get("conclusion").is_none());
         // Nested/verbose fields (and the trigger user's email) are dropped.
         assert!(v.get("repository").is_none());
         assert!(v.get("trigger_user").is_none());
         assert!(v.get("event_payload").is_none());
+    }
+
+    #[test]
+    fn a_gitea_run_normalizes_onto_the_same_shape() {
+        // Field-for-field a real `gitea.com` response (gitea/tea run 1657, a branch push),
+        // trimmed to the keys that matter. Note `path`: it is NOT a filesystem path.
+        let raw = vec![serde_json::json!({
+            "id": 42,
+            "run_number": 7,
+            "display_title": "CI",
+            "status": "completed",
+            "conclusion": "success",
+            "event": "push",
+            "path": "ci.yml@refs/heads/main",
+            "head_branch": "main",
+            "head_sha": "deadbeef",
+            "html_url": "https://gitea.com/o/r/actions/runs/7",
+            "created_at": "2026-07-06T00:00:00Z",
+            "started_at": "2026-07-06T00:00:01Z",
+            "completed_at": "2026-07-06T00:01:00Z",
+            "repository": { "full_name": "o/r", "private": true },
+            "actor": { "login": "brechanbech", "email": "person@example.com" },
+            "pull_requests": [{ "number": 1 }]
+        })];
+        let slim = slim_runs(&raw);
+        let v = serde_json::to_value(&slim[0]).unwrap();
+
+        // Same keys, same values as the Forgejo run above — that is the whole point.
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["run_number"], 7);
+        assert_eq!(v["title"], "CI");
+        assert_eq!(v["workflow"], "ci.yml");
+        assert_eq!(v["ref"], "main");
+        assert_eq!(v["commit_sha"], "deadbeef");
+        assert_eq!(v["created"], "2026-07-06T00:00:00Z");
+        assert_eq!(v["stopped"], "2026-07-06T00:01:00Z");
+        // The conclusion is promoted into `status`, and also kept verbatim.
+        assert_eq!(v["status"], "success");
+        assert_eq!(v["conclusion"], "success");
+        assert!(v.get("repository").is_none());
+        assert!(v.get("actor").is_none());
+        assert!(v.get("pull_requests").is_none());
+    }
+
+    #[test]
+    fn a_gitea_pull_request_run_recovers_its_ref_from_the_path() {
+        // Real shape from gitea.com (gitea/tea run 1664): `head_branch` is null on a pull
+        // request run, so the ref has to come out of `path`. Reading `path` as a filesystem
+        // path — the bug the first live probe caught — reported the workflow as "head".
+        let raw = vec![serde_json::json!({
+            "id": 920_800,
+            "run_number": 1664,
+            "path": "test-pr.yml@refs/pull/1117/head",
+            "head_branch": null,
+            "status": "completed",
+            "conclusion": "success",
+        })];
+        let v = serde_json::to_value(&slim_runs(&raw)[0]).unwrap();
+        assert_eq!(v["workflow"], "test-pr.yml");
+        // No short form exists for a pull-request ref, so it stays whole and says so.
+        assert_eq!(v["ref"], "refs/pull/1117/head");
+    }
+
+    #[test]
+    fn a_gitea_tag_run_recovers_a_short_ref_from_the_path() {
+        // Real shape from gitea.com (gitea/tea run 1662): `head_branch` is null for a tag too.
+        let raw = vec![serde_json::json!({
+            "id": 5,
+            "path": "release-tag.yml@refs/tags/v0.16.0",
+            "head_branch": null,
+            "status": "completed",
+            "conclusion": "success",
+        })];
+        let v = serde_json::to_value(&slim_runs(&raw)[0]).unwrap();
+        assert_eq!(v["workflow"], "release-tag.yml");
+        assert_eq!(v["ref"], "v0.16.0");
+    }
+
+    #[test]
+    fn an_unfinished_gitea_run_reports_its_phase_not_a_blank_conclusion() {
+        // Gitea sends "" rather than null for a conclusion that doesn't exist yet; an empty
+        // string must not displace the status or appear as a field.
+        let raw = vec![serde_json::json!({
+            "id": 8,
+            "status": "in_progress",
+            "conclusion": "",
+            "completed_at": "",
+        })];
+        let v = serde_json::to_value(&slim_runs(&raw)[0]).unwrap();
+        assert_eq!(v["status"], "in_progress");
+        assert!(v.get("conclusion").is_none());
+        assert!(v.get("stopped").is_none());
+    }
+
+    #[test]
+    fn a_run_that_is_not_an_object_is_skipped() {
+        let raw = vec![Value::String("nonsense".to_owned()), serde_json::json!({})];
+        // The string is dropped; the empty object survives as an all-absent summary.
+        assert_eq!(slim_runs(&raw).len(), 1);
+    }
+
+    #[test]
+    fn a_gitea_workflow_path_reduces_to_the_file_name_dispatch_expects() {
+        assert_eq!(workflow_basename(".gitea/workflows/ci.yml"), "ci.yml");
+        assert_eq!(
+            workflow_basename(".github/workflows/release.yml"),
+            "release.yml"
+        );
+        assert_eq!(workflow_basename("ci.yml"), "ci.yml");
     }
 
     // --- bounded file reads ---

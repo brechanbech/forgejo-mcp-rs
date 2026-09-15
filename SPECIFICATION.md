@@ -7,8 +7,9 @@ exposes. Code and README track this document.
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server, in Rust, that lets an
 MCP client (Claude Code, Claude Desktop, …) inspect a [Forgejo](https://forgejo.org/)
-instance — primarily [Codeberg](https://codeberg.org) — over its REST API: the authenticated
-user, repositories, issues, and pull requests. **Read-only by default**; repository writes
+instance — primarily [Codeberg](https://codeberg.org) — or a [Gitea](https://about.gitea.com/)
+one (v0.20), over its REST API: the authenticated user, repositories, issues, and pull
+requests. **Read-only by default**; repository writes
 (create/delete) are available only via a separate write token and a deliberate, time-boxed
 write mode (v0.2).
 
@@ -76,6 +77,7 @@ follows the recommended migration: `init_tracing` writes to stderr, never `notif
 | `FORGEJO_TOKEN_WRITE` | no | — | Write/delete-scoped token. **Its presence enables the write tools**; absent ⇒ the server is read-only. |
 | `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window, clamped to `1..=60`. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
+| `FORGEJO_FLAVOR` | no | `auto` | `forgejo` / `gitea` / `auto`. Pins the instance flavor instead of detecting it; only the Actions tools consult it. An unrecognized value fails startup. |
 | `RUST_LOG` | no | `forgejo_mcp_rs=info` | Tracing filter (logs go to stderr). |
 
 \* A read token is required (under either name); the server refuses to start without one. A
@@ -198,6 +200,11 @@ fields; the second stands, so renaming is still not exposed. See the v0.15 secti
 landed across v0.3–v0.11 and are listed in the README's current tool table rather than here.)
 
 ### v0.12 — Forgejo Actions (CI)
+
+> This section describes the surface as it stood at v0.12, when Forgejo was the only supported
+> forge. **v0.20 generalized it to Gitea**, which does have a list-workflows API and does report
+> a separate `conclusion`; see [v0.20](#v020--gitea-support) for what changed and what the run
+> shape looks like now.
 
 | Tool | Status | Purpose |
 |---|---|---|
@@ -395,6 +402,113 @@ before the first `@@`: inside a hunk, a removed line whose content starts with `
 are covered by unit tests; the real-diff fixture is fetched output, not hand-written, so the parser
 is pinned to what Forgejo actually serves.
 
+### v0.20 — Gitea support
+
+Forgejo is a Gitea fork, and for this server's purposes the fork barely diverged. Diffing the
+two published OpenAPI specs (`gitea.com/swagger.v1.json` against `codeberg.org/swagger.v1.json`)
+over the ~25 endpoints this server calls found **only the Actions (CI) ones differ**. Issues,
+pull requests, diffs, PR files, branches, contents, search, orgs, notifications, push mirrors,
+and migration match in path, method, and response shape. So Gitea support is not a port or an
+abstraction layer; it is a handful of conditionals confined to the Actions calls.
+
+That shaped the design: no trait, no per-forge client, no second module. One `Flavor` enum, and
+only the three Actions functions ever ask for it.
+
+**Detecting the flavor.** From `GET /version`, lazily, cached in a `OnceLock` after first use.
+The heuristic reads backwards and the code says so: **Forgejo names Gitea in its own version
+string** — Codeberg reports `16.0.0-dev-741-6f391573+gitea-1.22.0`, older releases
+`7.0.4+0-gitea-1.22.0` — to advertise API compatibility, while Gitea never names itself
+(`1.27.0+dev-954-g1f3981a301`). A `gitea-` marker therefore means Forgejo. Failing that marker,
+the major version decides: Gitea is still on 1.x, Forgejo renumbered to 7 and beyond, so 2+ is
+Forgejo. Both live strings are pinned as constants in the client's unit tests.
+
+Detection is lazy rather than done at startup for two reasons: `from_env` is synchronous and does
+no network, and an instance that is briefly down should not prevent the server from starting.
+Failure falls back to Forgejo — the historical assumption — and is deliberately **not cached**, so
+a later call retries instead of living with a guess made during an outage. `FORGEJO_FLAVOR` pins
+it outright for an instance the heuristic misreads.
+
+A plain `std::sync::OnceLock` rather than an async-aware cell: a lost race costs one redundant
+`GET /version` and nothing else, which is not worth adding `tokio/sync` for.
+
+**The four differences, and why each is handled the way it is.**
+
+*Filters are translated, not duplicated.* Forgejo filters runs by `ref` (fully qualified) and
+`workflow_id` (a query parameter); Gitea uses `branch` (bare name) and moves the workflow filter
+into a separate `…/actions/workflows/{file}/runs` path. The tempting shortcut is to send both
+spellings and let each forge ignore the one it doesn't know. That is exactly wrong here: an
+unknown query parameter is **ignored, not rejected**, so Forgejo's `ref` sent to Gitea would
+silently return *unfiltered* runs — a filter that appears to work and doesn't. Translation is in
+one pure function, `run_list_request`, so both branches are unit-testable without a network.
+
+*A tag ref is left alone for Gitea.* `refs/heads/` is stripped for Gitea's `branch` filter, but
+`refs/tags/v1` is passed through untouched. Gitea has no tag filter on this endpoint, so it
+cannot match either way; rewriting it to `v1` would only disguise the miss as a branch that
+doesn't exist.
+
+*Gitea's `path` is not a path.* This is the one thing the spec diff could not have told us, and
+the first live probe caught it. Gitea reports `path` as `test-pr.yml@refs/pull/1117/head` — the
+workflow file, an `@`, and the fully-qualified ref — not a filesystem path. Reading it as one
+(basename after the last `/`) reported the workflow as `head`. It is also the *only* reliable
+source of the ref: `head_branch` is populated for branch runs and null for both tags and pull
+requests, so the ref is recovered from `path` and then shortened to match Forgejo's `prettyref`
+(`refs/heads/main` → `main`, `refs/tags/v0.16.0` → `v0.16.0`). A pull-request ref has no short
+form and is left whole, which at least says plainly what kind of run it was.
+
+*An unknown workflow filter diverges.* Because the workflow filter is a path segment on Gitea
+and a query parameter on Forgejo, filtering by a workflow that doesn't exist returns `404
+workflow "ci.yml" not found` on Gitea and an **empty list** on Forgejo. Both confirmed live. This
+matters more than it looks: the tool description used to say a 404 means Actions is disabled, and
+a model following that would draw the wrong conclusion. The description now distinguishes them.
+
+*Runs are normalized onto one shape.* Gitea took GitHub's vocabulary (`head_sha`, `head_branch`,
+`run_number`, `display_title`, `created_at`, and a `status`/`conclusion` split) while Forgejo kept
+its own (`commit_sha`, `prettyref`, `index_in_repo`, `title`, `created`, and a single `status`
+carrying the outcome). `list_workflow_runs` folds them together so that "did this run pass?" is
+the same question on both: Gitea's `conclusion` is promoted into `status`, where Forgejo already
+puts the outcome, and kept verbatim alongside it for callers that want the phase/outcome
+distinction. The fields are allow-listed rather than filtered out, which is also what keeps the
+embedded `repository` object, the whole `event_payload`, and the `trigger_user` email out of the
+response. An empty string counts as absent, because both forges send `""` rather than null for a
+conclusion or timestamp that doesn't exist yet — otherwise a queued run would report a blank
+conclusion and lose its status.
+
+This renamed the summary's fields (`index_in_repo` → `run_number`, `prettyref` → `ref`,
+`workflow_id` → `workflow`), which is the breaking part of the release and the reason it is a
+minor bump.
+
+*`get_workflow_run` is deliberately left un-normalized.* It exists to return the instance's full,
+unmodified run object, so it stays shaped differently on each forge. `list_workflow_runs` is the
+normalized view; the tool descriptions say which is which.
+
+*Dispatch adapts to the reply.* `return_run_info` — which makes the endpoint answer with the run
+it just created — is a Forgejo extension, so it is omitted on Gitea, which replies `204 No
+Content`. Rather than return a bare null, the tool synthesizes an acknowledgement naming the
+workflow and ref and pointing the caller at `list_workflow_runs`, so a model isn't left guessing
+whether the dispatch took.
+
+**What is verified, and what isn't.** Everything below was driven through the installed binary
+over stdio against live `gitea.com`, with a read-only token, on 15 September 2026:
+
+- Flavor detection (`gitea.com` → `gitea`, reporting `1.27.0+dev-954-g1f3981a301`), the
+  `FORGEJO_FLAVOR` override, and startup rejection of a bad override value.
+- The read surface against a private repo: `whoami`, `list_my_repos`, `get_repo`,
+  `list_branches`, `get_file_contents` (including a line window), `list_issues`,
+  `list_pull_requests`, `list_orgs`, `search_repos`.
+- The Actions read tools against a public repo with real history (`gitea/tea`, 864 runs):
+  `list_workflow_runs` unfiltered and filtered by `workflow_id`, `ref`, `status` and
+  `head_sha` — each returning the correct subset, which is what proves the per-flavor
+  translation actually filters rather than being silently ignored — plus `get_workflow_run`.
+  Normalization was checked against branch, tag and pull-request runs, the three cases that
+  exercise the `path` split and the `head_branch` fallback.
+
+**`dispatch_workflow` on Gitea remains unverified.** It needs write mode against a repo whose
+workflows one is entitled to trigger, and firing someone else's CI to test a code path is not a
+reasonable thing to do. The request body is unit-tested and the endpoint path is shared with
+Forgejo, where dispatch is verified; what is unproven is Gitea's acceptance of that body and the
+`204` handling. Treat it as v0.17's `migrate_repo` is treated: implemented and reviewed, not yet
+proven.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -447,7 +561,8 @@ the server has proper CI tooling: `list_workflow_runs` (a run's pass/fail is its
 there is no separate `conclusion`) and `get_workflow_run` (read), plus `dispatch_workflow`
 (write-mode, keyed by workflow file name since there is no list-workflows API). Residual gap:
 Forgejo exposes no repo-level **logs or artifacts** endpoint, so the tools can report *that* a
-run failed and link to it, but can't retrieve the log text programmatically.
+run failed and link to it, but can't retrieve the log text programmatically. (All of this is
+Forgejo-specific; v0.20 added Gitea, where the run shape and the available endpoints differ.)
 
 ### Why the in-house client (dropping `forgejo-api`)
 
@@ -489,5 +604,8 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
 9. **v0.19.0** — bounded reads: a line window on `get_file_contents`, plus
    `list_pull_request_files` and `get_pull_request_diff` for reviewing a change without pulling the
    whole diff. *(done)*
-10. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
+10. **v0.20.0** — Gitea support: automatic flavor detection, per-flavor Actions requests, and a
+    normalized workflow-run shape across both forges. *(done; Actions tools not yet exercised
+    against a live Gitea instance)*
+11. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
     Non-goals), and slimming what still passes through raw.
