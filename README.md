@@ -123,7 +123,15 @@ The server is **read-only by default.** `create_repo` / `edit_repo` / `delete_re
 `FORGEJO_TOKEN_WRITE` is configured **and** (b) you've deliberately entered **write mode** via
 `enable_write_mode` — a time-boxed elevation (default 10 min, max 60) that slides forward on
 each write and auto-reverts. `write_status` reports the state; `delete_repo` also requires a
-`confirm` argument equal to `"owner/repo"`. See [`SPECIFICATION.md`](SPECIFICATION.md#write-mode-deliberate-time-boxed-elevation)
+`confirm` argument equal to `"owner/repo"`.
+
+`enable_write_mode`, `disable_write_mode` and `write_status` all report the `instance` they
+apply to, and the elevation note names it in prose, so the announcement reads "write mode is
+active on `https://gitea.com/`" rather than a bare "write mode is on". That matters once you
+run **more than one of these servers at once** — a Codeberg one and a Gitea one, say — where
+each has its own independent write mode and an unqualified warning tells you nothing about
+which forge is now writable. `write_status` deliberately never calls the instance, so its
+`flavor` is `null` until something else has detected it. See [`SPECIFICATION.md`](SPECIFICATION.md#write-mode-deliberate-time-boxed-elevation)
 for the full design.
 
 ### Migration source token (optional)

@@ -150,6 +150,18 @@ impl Forge {
         self
     }
 
+    /// The flavor if it is already settled — pinned via `FORGEJO_FLAVOR`, or cached from an
+    /// earlier detection — without making a request.
+    ///
+    /// For callers that must stay local. `write_status` is the one that matters: it reports
+    /// elevation state and is exactly the tool you reach for when an instance is misbehaving,
+    /// so it should not be the tool that blocks on a `GET /version` to that instance.
+    #[must_use]
+    pub fn flavor_if_known(&self) -> Option<Flavor> {
+        self.forced_flavor
+            .or_else(|| self.detected_flavor.get().copied())
+    }
+
     /// The instance flavor: the pinned value, the cached detection, or a fresh
     /// `GET /version`.
     ///

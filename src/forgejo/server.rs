@@ -367,11 +367,16 @@ impl ForgejoMcp {
 
     /// Reports write-mode status (always available).
     #[tool(
-        description = "Report write-mode status: whether a write token is configured, whether write mode is active, and minutes remaining"
+        description = "Report write-mode status: which instance this server writes to, whether a write token is configured, whether write mode is active, and minutes remaining"
     )]
     async fn write_status(&self) -> Result<CallToolResult, McpError> {
         let remaining = self.minutes_remaining();
         json_result(&serde_json::json!({
+            "instance": self.forgejo.base_url(),
+            // Deliberately the non-blocking accessor: this tool reports local elevation state
+            // and must not start depending on the instance being reachable. `null` here means
+            // "not detected yet", not "unknown forge" — `version` will settle it.
+            "flavor": self.forgejo.flavor_if_known().map(Flavor::as_str),
             "write_token_configured": self.elevation.is_configured(),
             "write_mode_active": remaining > 0,
             "minutes_remaining": remaining,
@@ -382,7 +387,7 @@ impl ForgejoMcp {
 
     /// Enters write mode for a limited, sliding window.
     #[tool(
-        description = "Enter write mode for a limited time (default 10 min, max 60), required before any write tool. Announce this to the user."
+        description = "Enter write mode for a limited time (default 10 min, max 60), required before any write tool. Announce this to the user, naming the instance from the returned `instance` field — several of these servers may be configured against different forges at once."
     )]
     async fn enable_write_mode(
         &self,
@@ -392,12 +397,19 @@ impl ForgejoMcp {
             return Err(self.elevation.not_configured_error());
         }
         let minutes = self.elevation.enable(params.minutes);
+        // The instance is named in the note, not just carried as a field, because the note is
+        // what a model tends to repeat verbatim — and "write mode is on" without saying *where*
+        // is precisely the announcement that misleads when several forges are configured.
+        let instance = self.forgejo.base_url();
         json_result(&serde_json::json!({
             "write_mode_active": true,
             "minutes": minutes,
+            "instance": instance,
+            "flavor": self.forgejo.flavor().await.as_str(),
             "note": format!(
-                "Write mode is active for {minutes} min (slides forward on each write, then \
-                 auto-reverts to read-only). Tell the user write mode is on."
+                "Write mode is active on {instance} for {minutes} min (slides forward on each \
+                 write, then auto-reverts to read-only). Tell the user write mode is on, and \
+                 name that instance — do not say just \"write mode is on\"."
             ),
         }))
     }
@@ -406,7 +418,12 @@ impl ForgejoMcp {
     #[tool(description = "Leave write mode immediately (back to read-only)")]
     async fn disable_write_mode(&self) -> Result<CallToolResult, McpError> {
         self.elevation.disable();
-        json_result(&serde_json::json!({ "write_mode_active": false }))
+        let instance = self.forgejo.base_url();
+        json_result(&serde_json::json!({
+            "write_mode_active": false,
+            "instance": instance,
+            "note": format!("Write mode is off; {instance} is read-only again."),
+        }))
     }
 
     // --- repo management (require write mode) ---
@@ -630,7 +647,10 @@ impl ServerHandler for ForgejoMcp {
              delete_repo) \
              require BOTH a configured write token and deliberately entering write mode via \
              enable_write_mode — a time-boxed elevation (default 10 min, max 60) that \
-             auto-reverts. When you enable write mode or perform a write, say so to the user. \
+             auto-reverts. When you enable write mode or perform a write, say so to the user, \
+             naming the instance from the `instance` field these tools return: several of \
+             these servers may be configured at once against different forges, so \
+             \"write mode is on\" without naming the instance is ambiguous. \
              delete_repo needs a `confirm` argument exactly equal to \"owner/repo\". \
              Push-mirror tools (add/list/delete/sync_push_mirrors) also require write mode; \
              add_push_mirror reads the remote push credential from the server's \
@@ -669,15 +689,25 @@ impl ServerHandler for ForgejoMcp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Elevation, Forge, ForgejoMcp, MAX_WRITE_MINUTES, Url};
+    use super::{Arc, ContentBlock, Elevation, Flavor, Forge, ForgejoMcp, MAX_WRITE_MINUTES, Url};
 
     /// A server with dummy clients (no network is touched by the logic under test). The
     /// write-mode gating itself is tested in `crate::mcp_core::Elevation`; here we only cover the
     /// forge-specific credential plumbing.
     fn server(with_write: bool) -> ForgejoMcp {
-        let url = Url::parse("https://codeberg.org").unwrap();
-        let read = Arc::new(Forge::new(&url, "ro").unwrap());
-        let write = with_write.then(|| Arc::new(Forge::new(&url, "rw").unwrap()));
+        server_at("https://codeberg.org", with_write, None)
+    }
+
+    /// As [`server`], but bound to a named instance — for the write-mode reporting, whose whole
+    /// point is telling two configured forges apart.
+    ///
+    /// `flavor` pins the detection so that tools calling `Forge::flavor` short-circuit instead
+    /// of reaching the network; pass `None` to test the undetected state.
+    fn server_at(base: &str, with_write: bool, flavor: Option<Flavor>) -> ForgejoMcp {
+        let url = Url::parse(base).unwrap();
+        let read = Arc::new(Forge::new(&url, "ro").unwrap().with_forced_flavor(flavor));
+        let write = with_write
+            .then(|| Arc::new(Forge::new(&url, "rw").unwrap().with_forced_flavor(flavor)));
         ForgejoMcp {
             tool_router: ForgejoMcp::tool_router(),
             forgejo: read,
@@ -690,6 +720,66 @@ mod tests {
             mirror_token: None,
             migrate_token: None,
         }
+    }
+
+    /// Extracts the JSON a tool returned, for the write-mode reporting tests.
+    fn result_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let text = result
+            .content
+            .first()
+            .and_then(ContentBlock::as_text)
+            .map(|t| t.text.clone())
+            .expect("tool returned text content");
+        serde_json::from_str(&text).expect("tool content is JSON")
+    }
+
+    /// The reason the instance is reported at all: with several of these servers configured
+    /// against different forges, "write mode is on" has to say *where*.
+    #[tokio::test]
+    async fn entering_write_mode_names_the_instance_it_applies_to() {
+        for (base, flavor) in [
+            ("https://codeberg.org", Flavor::Forgejo),
+            ("https://gitea.com", Flavor::Gitea),
+        ] {
+            // Pinned so the flavor needs no `GET /version`: these tests must not touch the
+            // network.
+            let s = server_at(base, true, Some(flavor));
+            let v = result_json(
+                &s.enable_write_mode(rmcp::handler::server::wrapper::Parameters(
+                    super::tools::EnableWriteParams { minutes: Some(5) },
+                ))
+                .await
+                .unwrap(),
+            );
+            assert_eq!(v["write_mode_active"], true);
+            assert_eq!(v["instance"], format!("{base}/"));
+            assert_eq!(v["flavor"], flavor.as_str());
+            // The note is what a model repeats back, so the instance must be in the prose too,
+            // not merely available in a field beside it.
+            let note = v["note"].as_str().unwrap();
+            assert!(note.contains(base), "note must name the instance: {note}");
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_write_mode_names_the_instance_too() {
+        let s = server_at("https://gitea.com", true, Some(Flavor::Gitea));
+        let v = result_json(&s.disable_write_mode().await.unwrap());
+        assert_eq!(v["write_mode_active"], false);
+        assert_eq!(v["instance"], "https://gitea.com/");
+        assert!(v["note"].as_str().unwrap().contains("gitea.com"));
+    }
+
+    /// `write_status` must stay local: it is the tool you reach for when the instance is
+    /// misbehaving, so it reports the flavor only if already settled rather than detecting one.
+    #[tokio::test]
+    async fn write_status_reports_the_instance_without_reaching_it() {
+        // An unresolvable host: any attempt to detect the flavor here would hang or fail.
+        let s = server_at("https://example.invalid", true, None);
+        let v = result_json(&s.write_status().await.unwrap());
+        assert_eq!(v["instance"], "https://example.invalid/");
+        assert!(v["flavor"].is_null(), "undetected flavor reports as null");
+        assert_eq!(v["write_token_configured"], true);
     }
 
     #[test]

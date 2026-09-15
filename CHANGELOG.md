@@ -28,6 +28,15 @@ path, method, and response shape, and were already working against Gitea unteste
   detection guesses wrong. An unrecognized value fails startup with a message naming the
   accepted ones, rather than being silently ignored.
 - **`flavor` in the `version` tool's output**, so a client can see which forge it reached.
+- **The write-mode tools now name the instance they apply to.** `enable_write_mode`,
+  `disable_write_mode` and `write_status` all return an `instance` field, and the elevation note
+  names it in prose — "Write mode is active on `https://gitea.com/` for 5 min" — because the note
+  is what a model repeats back to the user. With several of these servers configured against
+  different forges, each has its own independent write mode, so an unqualified "write mode is on"
+  does not say which forge just became writable. `enable_write_mode` reports the `flavor` too.
+  `write_status` deliberately does **not** detect it: that tool reports local elevation state and
+  is exactly what you reach for when an instance is misbehaving, so it never blocks on a request
+  to that instance and reports `flavor: null` until something else has settled it.
 
 ### Changed
 
