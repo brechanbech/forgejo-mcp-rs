@@ -8,6 +8,28 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [Unreleased]
+
+### Changed
+
+- **The Actions tool description and the server instructions no longer undersell the
+  divergence.** Both said to read the outcome from `status`, "which on Gitea carries the run's
+  conclusion" — true, and misleading: it reads as though one field differs, when a workflow run
+  shares only `id`, `event` and `html_url` between the two forges. A consumer that took it at
+  face value would decode a Gitea run into a near-empty object without any error, since every
+  other field is optional. They now say plainly that the output is a translation and that its
+  field names are this server's own.
+
+### Added
+
+- **A `Forgejo vs Gitea` section in the README** — the field-by-field comparison for workflow
+  runs, the per-flavor request differences, and the three details that are invisible in the
+  OpenAPI specs and only show up in live responses (`path` carries a ref, `head_branch` is null
+  for tags and pull requests, unset values are `""` rather than null). Written down because the
+  knowledge was only in Rust doc comments and test fixtures, where a second consumer of these
+  APIs could not find it, and re-deriving it from the specs produces the wrong answer.
+
+
 ## [0.20.0] — 2026-09-15
 
 Gitea support. The server now talks to Gitea as well as Forgejo and Codeberg, from one binary,

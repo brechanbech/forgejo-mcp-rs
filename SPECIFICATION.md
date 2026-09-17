@@ -411,6 +411,14 @@ pull requests, diffs, PR files, branches, contents, search, orgs, notifications,
 and migration match in path, method, and response shape. So Gitea support is not a port or an
 abstraction layer; it is a handful of conditionals confined to the Actions calls.
 
+That claim is scoped to *this server's* endpoints, and it is worth stating what it does not
+cover. The contents endpoint also diverges — Forgejo dates a file's last change with
+`last_commit_when`, Gitea with `last_author_date`/`last_committer_date`, and only Gitea carries
+`last_commit_message` — which does not matter here because no tool reads those fields, but does
+matter to anything rendering a file listing. The full field-by-field comparison, including the
+parts that are only observable from live responses rather than from the specs, is in the
+README's [Forgejo vs Gitea](README.md#forgejo-vs-gitea) section.
+
 That shaped the design: no trait, no per-forge client, no second module. One `Flavor` enum, and
 only the three Actions functions ever ask for it.
 

@@ -343,7 +343,7 @@ impl ForgejoMcp {
 
     /// Lists a repository's Actions (CI) workflow runs, on either forge.
     #[tool(
-        description = "List a repository's Actions (CI) workflow runs (owner/repo), on Forgejo or Gitea. Filter by head_sha (best for 'did this commit pass?'), ref, status, event, or workflow_id (a file name like `ci.yml`). Runs are normalized to one shape across both forges: read the outcome from `status` (success/failure/running/…), which on Gitea carries the run's conclusion once it has one. A 404 means either that Actions is disabled on the repo, or — on Gitea only, and only when workflow_id is set — that no such workflow file exists; Forgejo returns an empty list for an unknown workflow_id instead."
+        description = "List a repository's Actions (CI) workflow runs (owner/repo), on Forgejo or Gitea. Filter by head_sha (best for 'did this commit pass?'), ref, status, event, or workflow_id (a file name like `ci.yml`). The two forges model a run almost entirely differently — Gitea copied GitHub's vocabulary, Forgejo kept its own — so this output is a translation, not either forge's raw shape: run_number, title, workflow, ref, commit_sha and created/started/stopped each come from a differently-named key on each forge. Read the outcome from `status` (success/failure/running/…); on Gitea that is its `conclusion`, since Gitea's own `status` reports only the phase (queued/in_progress/completed). Do not infer either forge's wire format from these field names. A 404 means either that Actions is disabled on the repo, or — on Gitea only, and only when workflow_id is set — that no such workflow file exists; Forgejo returns an empty list for an unknown workflow_id instead."
     )]
     async fn list_workflow_runs(
         &self,
@@ -660,9 +660,11 @@ impl ServerHandler for ForgejoMcp {
              mode, runs asynchronously (poll get_repo), leaves the source untouched, and takes \
              any source credential from FORGEJO_MIGRATE_TOKEN — again never as an argument. \
              Actions (CI), on both forges: list_workflow_runs and get_workflow_run are \
-             read-only. list_workflow_runs normalizes Forgejo's and Gitea's different run \
-             shapes into one — read the outcome from `status`, which on Gitea carries the \
-             run's conclusion once it has one. dispatch_workflow triggers a workflow_dispatch \
+             read-only. Forgejo and Gitea share almost no field names in a \
+             workflow run, so list_workflow_runs translates both onto one shape of its own \
+             rather than passing either through — treat those names as this server's \
+             vocabulary, not either forge's. Read the outcome from `status`; on Gitea that is \
+             its `conclusion`, its own `status` being only the phase. dispatch_workflow triggers a workflow_dispatch \
              run and requires write mode; it is keyed by workflow file name (discover it via \
              get_file_contents on .forgejo/workflows, .gitea/workflows or .github/workflows), \
              and on Gitea it returns only an acknowledgement, not the run. \

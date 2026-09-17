@@ -273,6 +273,88 @@ a tool argument, so it stays out of the conversation. See
 [Migration source token](#migration-source-token-optional) for how to mint and scope it — and
 for where it ends up, which is not where the other tokens go.
 
+## Forgejo vs Gitea
+
+The server talks to both from one binary, detecting the flavor from `GET /version`. Of the ~25
+endpoints it calls, the two forges agree on all but Actions — but where they disagree, they
+disagree completely, so this is the reference for what gets translated and what does not.
+
+Everything below was checked against the two published specs, `codeberg.org/swagger.v1.json` and
+`gitea.com/swagger.v1.json`, compared definition by definition. The three points marked *live*
+could not have come from the specs at all: they type the fields in question as bare strings.
+
+### A workflow run is a different object on each forge
+
+Gitea copied GitHub's vocabulary, Forgejo kept its own. The definitions are not even named alike
+— Forgejo's `ActionRun` against Gitea's `ActionWorkflowRun` — and of the fields worth reading,
+only `id`, `event` and `html_url` are spelled the same:
+
+| what it is | Forgejo | Gitea | this server |
+|---|---|---|---|
+| run counter | `index_in_repo` | `run_number` | `run_number` |
+| title | `title` | `display_title` | `title` |
+| outcome | `status` | `conclusion` | `status` |
+| phase | — | `status` | folded into `status` |
+| workflow file | `workflow_id` | file part of `path` | `workflow` |
+| ref | `prettyref` | `head_branch`, or the ref in `path` | `ref` |
+| commit | `commit_sha` | `head_sha` | `commit_sha` |
+| who triggered it | `trigger_user` | `trigger_actor`, `actor` | dropped (carries an email) |
+| times | `started`, `stopped`, `created` | `started_at`, `completed_at`, `created_at` | `started`, `stopped`, `created` |
+
+Three things are visible only from live data:
+
+- ***live*** — **`path` is not a path.** Gitea reports `ci.yml@refs/heads/main`: workflow file,
+  `@`, fully qualified ref. Reading it as a file path yields `head` as the "workflow", which is
+  what this server's first live probe returned.
+- ***live*** — **`head_branch` is null for tag and pull-request runs**, so the ref has to come
+  out of `path`.
+- ***live*** — **unset means `""`, not null.** A running Gitea run has `conclusion: ""` and
+  `completed_at: ""`. A consumer that decodes those as dates fails on the empty string, so a
+  single queued run can fail a whole listing.
+
+Gitea's `status` reports only `queued` / `in_progress` / `completed`, with the result arriving
+separately in `conclusion` once the run ends. This server promotes the conclusion into `status`,
+where Forgejo already puts the outcome, and keeps it verbatim alongside, so "did this pass?" is
+one question on both.
+
+**The output field names in the last column are this server's own**, not either forge's. Do not
+read them as the wire format.
+
+### Requests differ too
+
+An unknown query parameter is *ignored* rather than rejected, so the wrong spelling returns
+unfiltered results instead of an error:
+
+| filter | Forgejo | Gitea |
+|---|---|---|
+| git ref | `ref`, fully qualified | `branch`, bare name |
+| workflow file | `workflow_id` query | a `…/actions/workflows/{file}/runs` path |
+| `head_sha`, `status`, `event` | same | same |
+
+Unfiltered, the listing path is identical on both. `dispatch_workflow` differs as well:
+`return_run_info` is a Forgejo extension and Gitea rejects unknown body fields on that endpoint,
+so it is sent only to Forgejo — which is why Gitea answers with an acknowledgement rather than
+the run.
+
+### Everything else
+
+Issues, pull requests, diffs, PR files, branches, contents, search, orgs, notifications, push
+mirrors and migration are identical in path, method and response shape. Each forge does carry
+fields the other lacks, but they are extras rather than disagreements — Forgejo has `pronouns` on
+a user and `archive_download_count` on a release; Gitea has `time_estimate` on an issue and
+`branch_count` on a repository.
+
+The one real exception outside Actions is the contents endpoint, where each forge has a
+last-commit field the other does not:
+
+| | Forgejo | Gitea |
+|---|---|---|
+| when it last changed | `last_commit_when` | `last_author_date`, `last_committer_date` |
+| the commit message | — | `last_commit_message` |
+
+This server does not read those fields, but anything rendering a file listing needs both
+spellings or the date column comes out blank on one forge.
+
 ## Security
 
 The token is read from the environment only — never logged, never written to disk (the client
