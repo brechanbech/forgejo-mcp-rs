@@ -12,7 +12,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -629,13 +629,13 @@ impl ForgejoMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ForgejoMcp {
-    fn get_info(&self) -> ServerInfo {
-        // Lean on Default for protocol_version (rmcp negotiates up to 2026-07-28 from it).
-        // ServerInfo is #[non_exhaustive], so mutate a Default rather than use a struct literal.
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        // Lean on Default for protocol_version (ProtocolVersion::LATEST, 2025-11-25 in rmcp 3.4).
+        // ServerConfig is #[non_exhaustive], so mutate a Default rather than use a struct literal.
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         // NOT Default: `Implementation::from_build_env` expands `env!` inside rmcp, so it names
-        // the SDK ("rmcp 3.0.0") rather than this server. Clients see this in `server/discover`.
+        // the SDK ("rmcp 3.4.0") rather than this server. Clients see this in `server/discover`.
         // The crate, the binary, and the server all share the name.
         info.server_info = Implementation::new("forgejo-mcp-rs", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
