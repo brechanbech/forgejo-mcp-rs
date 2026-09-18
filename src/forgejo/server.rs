@@ -502,7 +502,7 @@ impl ForgejoMcp {
 
     /// Edits repository settings (visibility, description, default branch, feature toggles).
     #[tool(
-        description = "Edit repository settings: visibility (private true/false), description, website, default_branch, issues/PRs/wiki toggles, archived. Only provided fields change; renames are not supported. Requires write mode."
+        description = "Edit repository settings: visibility (private true/false), description, website, default_branch, issues/PRs/wiki/releases toggles, archived. Only provided fields change; renames are not supported. Set has_releases=true when release tools 404 on a repository that exists — the unit being off hides the whole endpoint family. Requires write mode."
     )]
     async fn edit_repo(
         &self,

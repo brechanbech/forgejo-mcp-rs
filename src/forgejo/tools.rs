@@ -1099,6 +1099,11 @@ pub struct EditRepoParams {
     /// Enable or disable the wiki.
     #[serde(default)]
     pub has_wiki: Option<bool>,
+    /// Enable or disable Releases. While off, every release endpoint 404s — including reads,
+    /// and including anonymous ones — so this is what to set when release tools report a
+    /// repository that plainly exists as missing.
+    #[serde(default)]
+    pub has_releases: Option<bool>,
     /// Archive (`true`) or unarchive (`false`) the repository.
     #[serde(default)]
     pub archived: Option<bool>,
@@ -1233,6 +1238,7 @@ fn edit_repo_body(params: EditRepoParams) -> serde_json::Map<String, Value> {
             params.has_pull_requests.map(Value::Bool),
         ),
         ("has_wiki", params.has_wiki.map(Value::Bool)),
+        ("has_releases", params.has_releases.map(Value::Bool)),
         ("archived", params.archived.map(Value::Bool)),
     ];
     fields
@@ -1899,8 +1905,32 @@ pub async fn get_release(forge: &Forge, params: ReleaseTagRef) -> Result<CallToo
     let release = forge
         .get_release_by_tag(&params.owner, &params.repo, &params.tag)
         .await
-        .map_err(to_mcp)?;
+        .map_err(|e| release_404_hint(e, &params.owner, &params.repo))?;
     json_result(&release)
+}
+
+/// Maps a release-endpoint error, disambiguating the one 404 that reads as something it is not.
+///
+/// Forgejo returns `404` for a release the repository does not have *and* for a repository with
+/// the Releases unit switched off — the whole endpoint family disappears, anonymously included.
+/// Untreated, the first reading ("no such release yet") sends a caller straight into
+/// `create_release`, which 404s in turn for a reason nothing has named. So the hint says both.
+fn release_404_hint(err: crate::mcp_core::ApiError, owner: &str, repo: &str) -> McpError {
+    use crate::mcp_core::ApiError;
+    if let ApiError::Status { code, .. } = &err
+        && code.as_u16() == 404
+    {
+        return McpError::invalid_params(
+            format!(
+                "{err} — either {owner}/{repo} has no release for that tag, or the repository \
+                 has Releases disabled, which 404s the whole endpoint family. Check \
+                 `has_releases` via get_repo: if it is false, turn the unit on (edit_repo \
+                 has_releases=true) before creating a release."
+            ),
+            None,
+        );
+    }
+    to_mcp(err)
 }
 
 /// Lists the files attached to one release.
@@ -2680,6 +2710,7 @@ mod tests {
             has_issues: None,
             has_pull_requests: None,
             has_wiki: None,
+            has_releases: None,
             archived: None,
         };
         let body = edit_repo_body(params);
@@ -2701,6 +2732,7 @@ mod tests {
             has_issues: None,
             has_pull_requests: None,
             has_wiki: None,
+            has_releases: None,
             archived: None,
         };
         assert!(edit_repo_body(params).is_empty());
