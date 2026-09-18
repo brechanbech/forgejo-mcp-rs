@@ -232,7 +232,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
 | `create_repo` | **write** | Create a repo (defaults to private) |
 | `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Async (poll `get_repo`); leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
-| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, issues/PRs/wiki toggles, archive. Only provided fields change; no renames |
+| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo that plainly exists as missing |
 | `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
 | `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
 | `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |

@@ -8,6 +8,26 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.20.2] — 2026-09-18
+
+### Added
+
+- **`edit_repo` can set every repository unit**, not three of seven: `has_releases`,
+  `has_actions`, `has_packages` and `has_projects` join `has_issues`, `has_pull_requests` and
+  `has_wiki`. The gap was not academic — `has_releases` is exactly what the release tools added
+  in 0.20.1 need, so the one setting that unblocks them was the one setting unreachable through
+  this server, and turning it on meant leaving for the web UI. `has_actions` gates the workflow
+  tools the same way.
+
+### Fixed
+
+- **A release 404 no longer reads as "no such release".** A repository with the Releases unit
+  switched off returns `404` from *every* release endpoint — reads included, anonymously
+  included — which is indistinguishable from a tag that simply has no release yet. Taken at face
+  value, `get_release`'s 404 sent a caller straight into `create_release`, which then 404'd for
+  a reason nothing had named. `get_release` now reports both readings and points at `get_repo`'s
+  `has_releases`. Found live against a repository whose releases unit was off.
+
 ## [0.20.1] — 2026-09-18
 
 ### Added

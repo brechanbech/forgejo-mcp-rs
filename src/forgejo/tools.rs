@@ -1104,6 +1104,16 @@ pub struct EditRepoParams {
     /// repository that plainly exists as missing.
     #[serde(default)]
     pub has_releases: Option<bool>,
+    /// Enable or disable Actions (CI). The workflow tools fail the same way the release tools
+    /// do while this is off: the endpoints are gone, not empty.
+    #[serde(default)]
+    pub has_actions: Option<bool>,
+    /// Enable or disable the package registry.
+    #[serde(default)]
+    pub has_packages: Option<bool>,
+    /// Enable or disable project boards.
+    #[serde(default)]
+    pub has_projects: Option<bool>,
     /// Archive (`true`) or unarchive (`false`) the repository.
     #[serde(default)]
     pub archived: Option<bool>,
@@ -1239,6 +1249,9 @@ fn edit_repo_body(params: EditRepoParams) -> serde_json::Map<String, Value> {
         ),
         ("has_wiki", params.has_wiki.map(Value::Bool)),
         ("has_releases", params.has_releases.map(Value::Bool)),
+        ("has_actions", params.has_actions.map(Value::Bool)),
+        ("has_packages", params.has_packages.map(Value::Bool)),
+        ("has_projects", params.has_projects.map(Value::Bool)),
         ("archived", params.archived.map(Value::Bool)),
     ];
     fields
@@ -2711,6 +2724,9 @@ mod tests {
             has_pull_requests: None,
             has_wiki: None,
             has_releases: None,
+            has_actions: None,
+            has_packages: None,
+            has_projects: None,
             archived: None,
         };
         let body = edit_repo_body(params);
@@ -2733,6 +2749,9 @@ mod tests {
             has_pull_requests: None,
             has_wiki: None,
             has_releases: None,
+            has_actions: None,
+            has_packages: None,
+            has_projects: None,
             archived: None,
         };
         assert!(edit_repo_body(params).is_empty());
