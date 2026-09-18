@@ -28,6 +28,9 @@ const DEFAULT_URL: &str = "https://codeberg.org";
 const DEFAULT_WRITE_MINUTES: u64 = 10;
 /// Hard cap on the write-mode window (minutes) — there is deliberately no permanent mode.
 const MAX_WRITE_MINUTES: u64 = 60;
+/// Default ceiling on one release-asset upload (MiB) when `FORGEJO_UPLOAD_MAX_MB` is unset.
+/// The file is read into memory to be sent, so this bounds that too.
+const DEFAULT_UPLOAD_MAX_MB: u64 = 100;
 
 /// The Forgejo / Codeberg MCP server.
 ///
@@ -50,6 +53,10 @@ pub struct ForgejoMcp {
     /// to a push target, this one to a repo being read from, and they are usually different hosts
     /// — sharing one variable would send a credential to a host it was never issued for.
     migrate_token: Option<Arc<Zeroizing<String>>>,
+    /// Bounds on release-asset uploads, from `FORGEJO_UPLOAD_ROOT` and `FORGEJO_UPLOAD_MAX_MB`.
+    /// Uploading is the only local-disk read this server performs, so it stays off until a root
+    /// is configured.
+    upload: Arc<tools::UploadPolicy>,
 }
 
 impl std::fmt::Debug for ForgejoMcp {
@@ -129,12 +136,29 @@ impl ForgejoMcp {
             .filter(|s| !s.is_empty())
             .map(|t| Arc::new(Zeroizing::new(t)));
 
+        // Release-asset uploads read the local disk and publish what they read, so the capability
+        // is opt-in: without a root, `upload_release_asset` refuses. Deliberately not defaulted to
+        // the working directory — an MCP server's cwd is whatever its client launched it from.
+        let upload_root = std::env::var("FORGEJO_UPLOAD_ROOT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        let upload_max_mb = std::env::var("FORGEJO_UPLOAD_MAX_MB")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|mb| *mb > 0)
+            .unwrap_or(DEFAULT_UPLOAD_MAX_MB);
+
         Ok(Self {
             tool_router: Self::tool_router(),
             forgejo: Arc::new(forgejo),
             elevation: Arc::new(elevation),
             mirror_token,
             migrate_token,
+            upload: Arc::new(tools::UploadPolicy {
+                root: upload_root,
+                max_bytes: upload_max_mb.saturating_mul(1024 * 1024),
+            }),
         })
     }
 
@@ -426,6 +450,39 @@ impl ForgejoMcp {
         }))
     }
 
+    /// Lists a repository's releases.
+    #[tool(
+        description = "List a repository's releases (owner/repo), newest first, each with its downloadable assets; optional page/limit"
+    )]
+    async fn list_releases(
+        &self,
+        Parameters(params): Parameters<tools::ListReleasesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_releases(&self.forgejo, params).await
+    }
+
+    /// Gets one release by its git tag.
+    #[tool(
+        description = "Get one release by its git tag (owner/repo/tag). Use this before create_release to make a release script idempotent: the tag is known up front, the release id only after creation."
+    )]
+    async fn get_release(
+        &self,
+        Parameters(params): Parameters<tools::ReleaseTagRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_release(&self.forgejo, params).await
+    }
+
+    /// Lists the files attached to one release.
+    #[tool(
+        description = "List the assets (attached files) of one release, by release_id. Returns each asset's id, name, size and download URL; the id is what delete_release_asset takes."
+    )]
+    async fn list_release_assets(
+        &self,
+        Parameters(params): Parameters<tools::ReleaseRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_release_assets(&self.forgejo, params).await
+    }
+
     // --- repo management (require write mode) ---
 
     /// Creates a repository for the authenticated user.
@@ -609,6 +666,53 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    // --- releases (require write mode) ---
+
+    /// Creates a release on a tag.
+    #[tool(
+        description = "Create a release on a git tag (requires write mode). The tag must already exist unless target_commitish is given, which creates it at that commit. Returns the new release, whose `id` addresses its assets."
+    )]
+    async fn create_release(
+        &self,
+        Parameters(params): Parameters<tools::CreateReleaseParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::create_release(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Uploads a local file as a release asset.
+    #[tool(
+        description = "Upload a local file as a release asset (requires write mode). Give release_id and file_path; the published name defaults to the file's own. The file must resolve inside the server's FORGEJO_UPLOAD_ROOT — uploads are refused outright when that is unset, since whatever is read becomes publicly downloadable. Forgejo keeps same-named assets side by side, so delete the old one first when replacing."
+    )]
+    async fn upload_release_asset(
+        &self,
+        Parameters(params): Parameters<tools::UploadReleaseAssetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::upload_release_asset(client, &self.upload, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Removes one file from a release.
+    #[tool(
+        description = "Delete one asset from a release by attachment_id (requires write mode). Used to replace a same-named asset, which Forgejo would otherwise keep alongside the new one."
+    )]
+    async fn delete_release_asset(
+        &self,
+        Parameters(params): Parameters<tools::DeleteReleaseAssetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::delete_release_asset(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
     // --- actions (CI) — dispatch requires write mode ---
 
     /// Triggers an Actions workflow via `workflow_dispatch`, on either forge.
@@ -659,8 +763,17 @@ impl ServerHandler for ForgejoMcp {
              carry issues/PRs across instances (push mirrors are git-only); it requires write \
              mode, runs asynchronously (poll get_repo), leaves the source untouched, and takes \
              any source credential from FORGEJO_MIGRATE_TOKEN — again never as an argument. \
+             Releases: list_releases, get_release (by tag) and list_release_assets are \
+             read-only; create_release, upload_release_asset and delete_release_asset require \
+             write mode. To publish a build, look the tag up with get_release first and create \
+             it only if that 404s — that keeps a re-run idempotent. Forgejo keeps same-named \
+             assets side by side rather than replacing them, so delete the old asset before \
+             uploading its replacement. upload_release_asset reads a LOCAL file and publishes \
+             it: it works only inside the server's FORGEJO_UPLOAD_ROOT and refuses everything \
+             when that is unset, so a refusal means the server needs configuring, not that the \
+             path should be worked around. \
              Actions (CI), on both forges: list_workflow_runs and get_workflow_run are \
-             read-only. Forgejo and Gitea share almost no field names in a \
+             read-only.Forgejo and Gitea share almost no field names in a \
              workflow run, so list_workflow_runs translates both onto one shape of its own \
              rather than passing either through — treat those names as this server's \
              vocabulary, not either forge's. Read the outcome from `status`; on Gitea that is \
@@ -721,6 +834,11 @@ mod tests {
             )),
             mirror_token: None,
             migrate_token: None,
+            // Uploads off by default, matching an unset FORGEJO_UPLOAD_ROOT.
+            upload: Arc::new(crate::forgejo::tools::UploadPolicy {
+                root: None,
+                max_bytes: 100 * 1024 * 1024,
+            }),
         }
     }
 

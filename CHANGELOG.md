@@ -8,7 +8,34 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
-## [Unreleased]
+## [0.20.1] — 2026-09-18
+
+### Added
+
+- **Release tools — `list_releases`, `get_release`, `list_release_assets` (read) and
+  `create_release`, `upload_release_asset`, `delete_release_asset` (write).** The Forgejo API
+  has had full release CRUD all along; this server just never wrapped it, so publishing a build
+  meant dropping out to `curl` with a token in the environment. `get_release` addresses a
+  release by *tag* rather than id, which is what lets a release script be idempotent: the tag is
+  known before the release exists, the numeric id only after. `delete_release_asset` exists
+  because Forgejo keeps same-named assets side by side instead of replacing them, so re-running
+  a release needs the old one removed first.
+- **`FORGEJO_UPLOAD_ROOT` and `FORGEJO_UPLOAD_MAX_MB`.** `upload_release_asset` is the only tool
+  that reads the local disk, and what it reads becomes publicly downloadable — so it is off
+  until a root is configured, confined to that root with the path resolved through symlinks
+  before the check (neither `..` nor a symlink escapes), limited to regular files under a size
+  ceiling, and restricted to plain filenames, which Forgejo takes verbatim. There is
+  deliberately no fallback to the working directory: an MCP server's cwd is whatever its client
+  launched it from.
+- **`RestClient::post_multipart`.** The release-asset upload is the one endpoint on this surface
+  that is not JSON going in. `send` was split into `begin`/`finish` so the multipart path gets
+  identical auth treatment rather than a second copy of the sensitive-header handling.
+- **A `Forgejo vs Gitea` section in the README** — the field-by-field comparison for workflow
+  runs, the per-flavor request differences, and the three details that are invisible in the
+  OpenAPI specs and only show up in live responses (`path` carries a ref, `head_branch` is null
+  for tags and pull requests, unset values are `""` rather than null). Written down because the
+  knowledge was only in Rust doc comments and test fixtures, where a second consumer of these
+  APIs could not find it, and re-deriving it from the specs produces the wrong answer.
 
 ### Changed
 
@@ -19,16 +46,6 @@ records what changed, that one records why.
   face value would decode a Gitea run into a near-empty object without any error, since every
   other field is optional. They now say plainly that the output is a translation and that its
   field names are this server's own.
-
-### Added
-
-- **A `Forgejo vs Gitea` section in the README** — the field-by-field comparison for workflow
-  runs, the per-flavor request differences, and the three details that are invisible in the
-  OpenAPI specs and only show up in live responses (`path` carries a ref, `head_branch` is null
-  for tags and pull requests, unset values are `""` rather than null). Written down because the
-  knowledge was only in Rust doc comments and test fixtures, where a second consumer of these
-  APIs could not find it, and re-deriving it from the specs produces the wrong answer.
-
 
 ## [0.20.0] — 2026-09-15
 

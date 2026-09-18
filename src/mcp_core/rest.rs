@@ -7,7 +7,7 @@
 //! it never lands in logs.
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
-use reqwest::{Client, Method};
+use reqwest::{Client, Method, RequestBuilder, multipart};
 use serde_json::Value;
 use url::Url;
 use zeroize::Zeroizing;
@@ -96,18 +96,18 @@ impl RestClient {
         })
     }
 
-    /// Performs one request and returns `(status-checked body bytes, total-count header)`.
+    /// Builds a request carrying everything common to every call: the joined URL, the sensitive
+    /// auth header, the `Accept` header, and any query string.
     ///
-    /// `accept` is the `Accept` header to send — JSON for the API proper, `text/plain` for the
-    /// endpoints that serve a raw document (e.g. a pull request's `.diff`).
-    async fn send(
+    /// Split out from [`RestClient::send`] so a multipart upload gets identical auth treatment
+    /// without restating it — the token handling is the part that must not drift.
+    fn begin(
         &self,
         method: Method,
         path: &str,
         query: &[(&str, String)],
-        body: Option<&Value>,
         accept: &'static str,
-    ) -> Result<(Vec<u8>, Option<usize>), ApiError> {
+    ) -> Result<RequestBuilder, ApiError> {
         let url = self
             .api_root
             .join(path)
@@ -127,10 +127,11 @@ impl RestClient {
         if !query.is_empty() {
             req = req.query(query);
         }
-        if let Some(body) = body {
-            req = req.json(body);
-        }
+        Ok(req)
+    }
 
+    /// Sends a prepared request and returns `(status-checked body bytes, total-count header)`.
+    async fn finish(req: RequestBuilder) -> Result<(Vec<u8>, Option<usize>), ApiError> {
         let resp = req.send().await.map_err(ApiError::Transport)?;
         let status = resp.status();
         let total = resp
@@ -145,6 +146,25 @@ impl RestClient {
             return Err(ApiError::Status { code: status, body });
         }
         Ok((bytes.to_vec(), total))
+    }
+
+    /// Performs one request and returns `(status-checked body bytes, total-count header)`.
+    ///
+    /// `accept` is the `Accept` header to send — JSON for the API proper, `text/plain` for the
+    /// endpoints that serve a raw document (e.g. a pull request's `.diff`).
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+        accept: &'static str,
+    ) -> Result<(Vec<u8>, Option<usize>), ApiError> {
+        let mut req = self.begin(method, path, query, accept)?;
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        Self::finish(req).await
     }
 
     /// Performs one JSON request and returns `(parsed body, total-count header)`. The body is
@@ -228,6 +248,39 @@ impl RestClient {
             .await?
             .0
             .unwrap_or(Value::Null))
+    }
+
+    /// `POST` of a `multipart/form-data` body carrying one file part, returning the created
+    /// resource.
+    ///
+    /// The release-asset upload is the only endpoint on this surface that is not JSON going in,
+    /// so this is deliberately narrow: exactly one part, named by `field`, sent as opaque bytes.
+    /// The caller has already read and size-checked the file — nothing here touches the disk.
+    ///
+    /// # Errors
+    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures, and reports an
+    /// unusable filename as [`ApiError::Config`].
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        field: &'static str,
+        file_name: String,
+        bytes: Vec<u8>,
+    ) -> Result<Value, ApiError> {
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str("application/octet-stream")
+            .map_err(|e| ApiError::Config(format!("building the upload part: {e}")))?;
+        let req = self
+            .begin(Method::POST, path, query, "application/json")?
+            .multipart(multipart::Form::new().part(field, part));
+
+        let (bytes, _) = Self::finish(req).await?;
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_slice(&bytes).map_err(ApiError::Decode)
     }
 
     /// `POST` with no body, discarding any (typically empty) response — for sync-style endpoints.

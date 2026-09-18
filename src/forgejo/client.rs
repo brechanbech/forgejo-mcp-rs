@@ -509,6 +509,107 @@ impl Forge {
         self.rest.delete(&format!("repos/{owner}/{repo}")).await
     }
 
+    // --- releases (and their downloadable assets) ---
+
+    /// `GET /repos/{owner}/{repo}/releases` — releases, newest first (paged).
+    pub async fn list_releases(
+        &self,
+        owner: &str,
+        repo: &str,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.rest
+            .get_list(
+                &format!("repos/{owner}/{repo}/releases"),
+                &paging(page, limit),
+            )
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/releases/tags/{tag}` — one release by its git tag.
+    ///
+    /// Addressing by tag rather than by numeric id is what makes a release script idempotent:
+    /// the tag is known before the release exists, the id only afterwards.
+    pub async fn get_release_by_tag(
+        &self,
+        owner: &str,
+        repo: &str,
+        tag: &str,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .get(&format!("repos/{owner}/{repo}/releases/tags/{tag}"), &[])
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/releases` — create a release. The body is a
+    /// `CreateReleaseOption`; the response is the new `Release`, whose `id` addresses its assets.
+    ///
+    /// The tag must already exist on the instance unless `target_commitish` is given, in which
+    /// case Forgejo creates the tag at that commit.
+    pub async fn create_release(
+        &self,
+        owner: &str,
+        repo: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .post(&format!("repos/{owner}/{repo}/releases"), body)
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/releases/{id}/assets` — the files attached to one release.
+    pub async fn list_release_assets(
+        &self,
+        owner: &str,
+        repo: &str,
+        id: i64,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .get(&format!("repos/{owner}/{repo}/releases/{id}/assets"), &[])
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/releases/{id}/assets?name=…` — attach a file to a release.
+    ///
+    /// The one multipart endpoint this server speaks: the file goes in an `attachment` form
+    /// part and the published filename in the `name` query parameter. Forgejo keeps same-named
+    /// assets side by side rather than replacing, so a caller re-running a release should delete
+    /// the old one first via [`Forge::delete_release_asset`].
+    pub async fn upload_release_asset(
+        &self,
+        owner: &str,
+        repo: &str,
+        id: i64,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .post_multipart(
+                &format!("repos/{owner}/{repo}/releases/{id}/assets"),
+                &[("name", name.to_owned())],
+                "attachment",
+                name.to_owned(),
+                bytes,
+            )
+            .await
+    }
+
+    /// `DELETE /repos/{owner}/{repo}/releases/{id}/assets/{attachment_id}` — detach one file.
+    pub async fn delete_release_asset(
+        &self,
+        owner: &str,
+        repo: &str,
+        id: i64,
+        attachment_id: i64,
+    ) -> Result<(), ForgeError> {
+        self.rest
+            .delete(&format!(
+                "repos/{owner}/{repo}/releases/{id}/assets/{attachment_id}"
+            ))
+            .await
+    }
+
     // --- push mirrors (repo-admin; auto-push this repo to an external remote) ---
 
     /// `POST /repos/{owner}/{repo}/push_mirrors` — add a push mirror. The body is a

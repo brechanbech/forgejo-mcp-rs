@@ -1662,6 +1662,446 @@ pub async fn sync_push_mirrors(forge: &Forge, params: RepoRef) -> Result<CallToo
     }))
 }
 
+// --- releases (and their downloadable assets) ---
+
+/// Parameters for the `list_releases` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListReleasesParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// 1-based page number; omit (with `limit`) to auto-paginate the whole list.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Items per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// A release addressed by its git tag.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ReleaseTagRef {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// The git tag the release is attached to, e.g. `v1.2.0`.
+    pub tag: String,
+}
+
+/// A release addressed by its numeric id (the `id` from `list_releases` or `create_release`).
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ReleaseRef {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Release id.
+    pub release_id: i64,
+}
+
+/// Parameters for the `create_release` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CreateReleaseParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Git tag for the release, e.g. `v1.2.0`. Must already exist unless `target_commitish`
+    /// is given, in which case the tag is created at that commit.
+    pub tag_name: String,
+    /// Release title. Defaults to the tag name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Release notes (markdown).
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Commit, branch or ref to create the tag at when it does not exist yet.
+    #[serde(default)]
+    pub target_commitish: Option<String>,
+    /// Publish as a draft (not visible to others). Defaults to false.
+    #[serde(default)]
+    pub draft: Option<bool>,
+    /// Mark as a pre-release. Defaults to false.
+    #[serde(default)]
+    pub prerelease: Option<bool>,
+}
+
+/// Parameters for the `upload_release_asset` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct UploadReleaseAssetParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Release id to attach the file to.
+    pub release_id: i64,
+    /// Path to the local file to upload. Must resolve to a regular file inside the server's
+    /// configured `FORGEJO_UPLOAD_ROOT`.
+    pub file_path: String,
+    /// Published filename. Defaults to the file's own name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Parameters for the `delete_release_asset` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct DeleteReleaseAssetParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Release id the asset belongs to.
+    pub release_id: i64,
+    /// Attachment id, from `list_release_assets`.
+    pub attachment_id: i64,
+}
+
+/// Where release-asset uploads may read from, and how large they may be.
+///
+/// Uploading is the only thing this server does that reads the local disk, and whatever it
+/// reads becomes a publicly downloadable file — so the capability is opt-in and bounded rather
+/// than implicit.
+#[derive(Debug, Clone)]
+pub struct UploadPolicy {
+    /// Directory uploads must sit inside (`FORGEJO_UPLOAD_ROOT`). `None` disables uploading.
+    pub root: Option<std::path::PathBuf>,
+    /// Largest file that may be uploaded, in bytes (`FORGEJO_UPLOAD_MAX_MB`).
+    pub max_bytes: u64,
+}
+
+/// One file attached to a release.
+#[derive(Debug, Serialize)]
+struct AssetSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    download_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    browser_download_url: Option<String>,
+}
+
+/// A release reduced to what identifies it and what can be downloaded from it.
+///
+/// The raw object also carries the full uploader `User` and the tarball/zipball URLs; those are
+/// dropped here for the same reason the other list tools slim — a release list is otherwise
+/// mostly boilerplate.
+#[derive(Debug, Serialize)]
+struct ReleaseSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prerelease: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    published_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// Attached files. Empty for a release that has none.
+    assets: Vec<AssetSummary>,
+}
+
+/// Projects one raw asset object onto [`AssetSummary`].
+fn slim_asset(value: &Value) -> AssetSummary {
+    AssetSummary {
+        id: value.get("id").and_then(Value::as_i64),
+        name: value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        size: value.get("size").and_then(Value::as_i64),
+        download_count: value.get("download_count").and_then(Value::as_i64),
+        browser_download_url: value
+            .get("browser_download_url")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    }
+}
+
+/// Projects raw release objects down to [`ReleaseSummary`], flattening the uploader to a login.
+fn slim_releases(items: Vec<Value>) -> Vec<ReleaseSummary> {
+    items
+        .into_iter()
+        .map(|value: Value| ReleaseSummary {
+            id: value.get("id").and_then(Value::as_i64),
+            tag_name: value
+                .get("tag_name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            name: value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            draft: value.get("draft").and_then(Value::as_bool),
+            prerelease: value.get("prerelease").and_then(Value::as_bool),
+            published_at: value
+                .get("published_at")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            html_url: value
+                .get("html_url")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            author: value
+                .get("author")
+                .and_then(|a| a.get("login"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            assets: value
+                .get("assets")
+                .and_then(Value::as_array)
+                .map(|assets| assets.iter().map(slim_asset).collect())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Lists a repository's releases, newest first.
+pub async fn list_releases(
+    forge: &Forge,
+    params: ListReleasesParams,
+) -> Result<CallToolResult, McpError> {
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| {
+            Box::pin(forge.list_releases(&params.owner, &params.repo, Some(page), Some(limit)))
+        })
+        .await
+        .map_err(to_mcp)?;
+        return gathered_result(&slim_releases(all.items), all.total, all.truncated);
+    }
+    let (releases, total) = forge
+        .list_releases(&params.owner, &params.repo, params.page, params.limit)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(
+        params.page,
+        params.limit,
+        total,
+        &slim_releases(into_items(releases)),
+    )
+}
+
+/// Gets one release by its git tag — the lookup that makes a release script idempotent, since
+/// the tag is known before the release exists and the numeric id only after.
+pub async fn get_release(forge: &Forge, params: ReleaseTagRef) -> Result<CallToolResult, McpError> {
+    let release = forge
+        .get_release_by_tag(&params.owner, &params.repo, &params.tag)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&release)
+}
+
+/// Lists the files attached to one release.
+pub async fn list_release_assets(
+    forge: &Forge,
+    params: ReleaseRef,
+) -> Result<CallToolResult, McpError> {
+    let assets = forge
+        .list_release_assets(&params.owner, &params.repo, params.release_id)
+        .await
+        .map_err(to_mcp)?;
+    let items: Vec<AssetSummary> = into_items(assets).iter().map(slim_asset).collect();
+    json_result(&serde_json::json!({
+        "release_id": params.release_id,
+        "returned": items.len(),
+        "items": items,
+    }))
+}
+
+/// Creates a release on an existing tag.
+pub async fn create_release(
+    forge: &Forge,
+    params: CreateReleaseParams,
+) -> Result<CallToolResult, McpError> {
+    if params.tag_name.trim().is_empty() {
+        return Err(McpError::invalid_params(
+            "tag_name must not be empty".to_owned(),
+            None,
+        ));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "tag_name".to_owned(),
+        Value::String(params.tag_name.clone()),
+    );
+    // Forgejo defaults an omitted name to the tag, but says so nowhere in the response — set it
+    // explicitly so the created release reads the same on both forges.
+    body.insert(
+        "name".to_owned(),
+        Value::String(params.name.unwrap_or(params.tag_name)),
+    );
+    if let Some(notes) = params.body {
+        body.insert("body".to_owned(), Value::String(notes));
+    }
+    if let Some(target) = params.target_commitish {
+        body.insert("target_commitish".to_owned(), Value::String(target));
+    }
+    body.insert(
+        "draft".to_owned(),
+        Value::Bool(params.draft.unwrap_or(false)),
+    );
+    body.insert(
+        "prerelease".to_owned(),
+        Value::Bool(params.prerelease.unwrap_or(false)),
+    );
+
+    let release = forge
+        .create_release(&params.owner, &params.repo, &Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&release)
+}
+
+/// Reads a local file for upload, enforcing [`UploadPolicy`].
+///
+/// Split out from [`upload_release_asset`] because this is the part with teeth: what it returns
+/// becomes a publicly downloadable file. The path is resolved through symlinks first and then
+/// required to sit under the configured root, so neither a `..` traversal nor a link pointing
+/// out of the tree escapes it. An unconfigured root refuses everything rather than falling back
+/// to the working directory — an MCP server's cwd is whatever its client happened to launch it
+/// from, which is no basis for deciding what may be published.
+fn read_upload(
+    policy: &UploadPolicy,
+    file_path: &str,
+    name: Option<String>,
+) -> Result<(String, Vec<u8>), McpError> {
+    let Some(configured_root) = policy.root.as_deref() else {
+        return Err(McpError::invalid_params(
+            "uploads are disabled: set FORGEJO_UPLOAD_ROOT on the MCP server to the directory \
+             release assets may be read from, then restart it"
+                .to_owned(),
+            None,
+        ));
+    };
+    let root = configured_root.canonicalize().map_err(|e| {
+        McpError::internal_error(
+            format!(
+                "FORGEJO_UPLOAD_ROOT ({}) cannot be resolved: {e}",
+                configured_root.display()
+            ),
+            None,
+        )
+    })?;
+    let path = std::path::Path::new(file_path)
+        .canonicalize()
+        .map_err(|e| {
+            McpError::invalid_params(format!("cannot resolve file_path {file_path}: {e}"), None)
+        })?;
+    if !path.starts_with(&root) {
+        return Err(McpError::invalid_params(
+            format!(
+                "{} is outside FORGEJO_UPLOAD_ROOT ({})",
+                path.display(),
+                root.display()
+            ),
+            None,
+        ));
+    }
+
+    let meta = std::fs::metadata(&path).map_err(|e| {
+        McpError::invalid_params(format!("cannot stat {}: {e}", path.display()), None)
+    })?;
+    if !meta.is_file() {
+        return Err(McpError::invalid_params(
+            format!("{} is not a regular file", path.display()),
+            None,
+        ));
+    }
+    if meta.len() > policy.max_bytes {
+        return Err(McpError::invalid_params(
+            format!(
+                "{} is {} bytes, over the {} byte limit — raise FORGEJO_UPLOAD_MAX_MB to upload it",
+                path.display(),
+                meta.len(),
+                policy.max_bytes
+            ),
+            None,
+        ));
+    }
+
+    let published = match name {
+        Some(n) => n,
+        None => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("{} has no usable filename; pass `name`", path.display()),
+                    None,
+                )
+            })?
+            .to_owned(),
+    };
+    // Forgejo takes the published name verbatim, so keep path syntax out of it.
+    if published.is_empty() || published.contains('/') || published.contains('\\') {
+        return Err(McpError::invalid_params(
+            format!("asset name {published:?} must be a plain filename"),
+            None,
+        ));
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| {
+        McpError::invalid_params(format!("cannot read {}: {e}", path.display()), None)
+    })?;
+    Ok((published, bytes))
+}
+
+/// Uploads a local file as a release asset.
+///
+/// The file is read under [`UploadPolicy`]; see [`read_upload`] for why that is not optional.
+pub async fn upload_release_asset(
+    forge: &Forge,
+    policy: &UploadPolicy,
+    params: UploadReleaseAssetParams,
+) -> Result<CallToolResult, McpError> {
+    let (name, bytes) = read_upload(policy, &params.file_path, params.name)?;
+    let uploaded = bytes.len();
+    let asset = forge
+        .upload_release_asset(&params.owner, &params.repo, params.release_id, &name, bytes)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&serde_json::json!({
+        "uploaded": name,
+        "bytes": uploaded,
+        "source": params.file_path,
+        "asset": asset,
+    }))
+}
+
+/// Removes one file from a release. Forgejo keeps same-named assets side by side, so replacing
+/// an asset means deleting the old one first.
+pub async fn delete_release_asset(
+    forge: &Forge,
+    params: DeleteReleaseAssetParams,
+) -> Result<CallToolResult, McpError> {
+    forge
+        .delete_release_asset(
+            &params.owner,
+            &params.repo,
+            params.release_id,
+            params.attachment_id,
+        )
+        .await
+        .map_err(to_mcp)?;
+    json_result(&serde_json::json!({
+        "deleted": true,
+        "release_id": params.release_id,
+        "attachment_id": params.attachment_id,
+    }))
+}
+
 // --- actions (CI) ---
 
 /// Parameters for the `list_workflow_runs` tool.
@@ -1946,6 +2386,287 @@ pub async fn dispatch_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch directory under the system temp dir, removed when the guard drops. Each upload
+    /// test needs a real tree on disk: the guard resolves symlinks and `..` through the actual
+    /// filesystem, so it cannot be tested against synthetic paths.
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "forgejo-mcp-upload-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            // Canonicalize the root itself: on macOS the temp dir sits under `/var`, a symlink to
+            // `/private/var`, and an uncanonicalized root would make these tests pass on that
+            // difference rather than on the behaviour under test.
+            Self(dir.canonicalize().unwrap())
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn write(&self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let path = self.0.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn policy(root: Option<&std::path::Path>, max_bytes: u64) -> UploadPolicy {
+        UploadPolicy {
+            root: root.map(std::path::Path::to_path_buf),
+            max_bytes,
+        }
+    }
+
+    #[test]
+    fn upload_is_refused_when_no_root_is_configured() {
+        let tree = TempTree::new("noroot");
+        let file = tree.write("asset.tar.gz", b"payload");
+
+        let err = read_upload(&policy(None, 1024), file.to_str().unwrap(), None)
+            .expect_err("an unset root must refuse, not fall back to something permissive");
+        assert!(
+            err.message.contains("FORGEJO_UPLOAD_ROOT"),
+            "the error should name the variable to set: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_file_inside_the_root_is_read() {
+        let tree = TempTree::new("inside");
+        let file = tree.write("dist/asset.tar.gz", b"payload");
+
+        let (name, bytes) = read_upload(
+            &policy(Some(tree.path()), 1024),
+            file.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(name, "asset.tar.gz", "the name defaults to the file's own");
+        assert_eq!(bytes, b"payload");
+    }
+
+    #[test]
+    fn an_explicit_name_overrides_the_filename() {
+        let tree = TempTree::new("rename");
+        let file = tree.write("asset.tar.gz", b"payload");
+
+        let (name, _) = read_upload(
+            &policy(Some(tree.path()), 1024),
+            file.to_str().unwrap(),
+            Some("xmcp-1.0.0-aarch64.tar.gz".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(name, "xmcp-1.0.0-aarch64.tar.gz");
+    }
+
+    #[test]
+    fn a_path_outside_the_root_is_refused() {
+        let root = TempTree::new("root");
+        let outside = TempTree::new("outside");
+        let secret = outside.write("id_rsa", b"-----BEGIN PRIVATE KEY-----");
+
+        let err = read_upload(
+            &policy(Some(root.path()), 1024),
+            secret.to_str().unwrap(),
+            None,
+        )
+        .expect_err("a file outside the root must be refused");
+        assert!(
+            err.message.contains("outside FORGEJO_UPLOAD_ROOT"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    /// The traversal case the `starts_with` check exists for: a path that *textually* begins
+    /// with the root but climbs back out of it.
+    #[test]
+    fn a_dotdot_traversal_out_of_the_root_is_refused() {
+        let root = TempTree::new("traverse-root");
+        let outside = TempTree::new("traverse-out");
+        let _secret = outside.write("id_rsa", b"key");
+
+        let climbing = format!(
+            "{}/../{}/id_rsa",
+            root.path().display(),
+            outside.path().file_name().unwrap().to_str().unwrap()
+        );
+
+        let err = read_upload(&policy(Some(root.path()), 1024), &climbing, None)
+            .expect_err("`..` must not escape the root");
+        assert!(
+            err.message.contains("outside FORGEJO_UPLOAD_ROOT"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    /// Canonicalizing before the check is what catches this: the path sits inside the root but
+    /// the file it names does not.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_pointing_out_of_the_root_is_refused() {
+        let root = TempTree::new("symlink-root");
+        let outside = TempTree::new("symlink-out");
+        let secret = outside.write("id_rsa", b"key");
+        let link = root.path().join("innocent.tar.gz");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let err = read_upload(
+            &policy(Some(root.path()), 1024),
+            link.to_str().unwrap(),
+            None,
+        )
+        .expect_err("a symlink out of the root must be refused");
+        assert!(
+            err.message.contains("outside FORGEJO_UPLOAD_ROOT"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_size_limit_is_refused() {
+        let tree = TempTree::new("toobig");
+        let file = tree.write("big.bin", &[0u8; 2048]);
+
+        let err = read_upload(
+            &policy(Some(tree.path()), 1024),
+            file.to_str().unwrap(),
+            None,
+        )
+        .expect_err("an oversized file must be refused");
+        assert!(
+            err.message.contains("FORGEJO_UPLOAD_MAX_MB"),
+            "the error should say how to raise the limit: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_uploadable() {
+        let tree = TempTree::new("dir");
+        std::fs::create_dir_all(tree.path().join("subdir")).unwrap();
+
+        let err = read_upload(
+            &policy(Some(tree.path()), 1024),
+            tree.path().join("subdir").to_str().unwrap(),
+            None,
+        )
+        .expect_err("a directory must be refused");
+        assert!(
+            err.message.contains("not a regular file"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_published_name_may_not_carry_path_syntax() {
+        let tree = TempTree::new("badname");
+        let file = tree.write("asset.tar.gz", b"payload");
+
+        for bad in ["../escape", "dir/asset.tar.gz", ""] {
+            let err = read_upload(
+                &policy(Some(tree.path()), 1024),
+                file.to_str().unwrap(),
+                Some(bad.to_owned()),
+            )
+            .expect_err("a name with path syntax must be refused");
+            assert!(
+                err.message.contains("plain filename"),
+                "unexpected message for {bad:?}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_file_reports_the_path() {
+        let tree = TempTree::new("missing");
+        let missing = tree.path().join("nope.tar.gz");
+
+        let err = read_upload(
+            &policy(Some(tree.path()), 1024),
+            missing.to_str().unwrap(),
+            None,
+        )
+        .expect_err("a missing file must be refused");
+        assert!(
+            err.message.contains("cannot resolve file_path"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn releases_are_slimmed_to_their_identity_and_assets() {
+        let raw = serde_json::json!([{
+            "id": 42,
+            "tag_name": "v3.3.1",
+            "name": "xojo-mcp 3.3.1",
+            "draft": false,
+            "prerelease": false,
+            "published_at": "2026-09-18T10:00:00Z",
+            "html_url": "https://codeberg.org/brechanbech/xojo-mcp/releases/tag/v3.3.1",
+            "author": { "login": "brechanbech", "email": "hidden@example.com" },
+            "tarball_url": "https://codeberg.org/…/v3.3.1.tar.gz",
+            "assets": [{
+                "id": 7,
+                "name": "xmcp-3.3.1-aarch64-apple-darwin.tar.gz",
+                "size": 532_480,
+                "download_count": 0,
+                "browser_download_url": "https://codeberg.org/…/xmcp.tar.gz",
+                "uuid": "dropped"
+            }]
+        }]);
+
+        let slimmed = slim_releases(into_items(raw));
+        assert_eq!(slimmed.len(), 1);
+        let release = &slimmed[0];
+        assert_eq!(release.id, Some(42));
+        assert_eq!(release.tag_name.as_deref(), Some("v3.3.1"));
+        assert_eq!(
+            release.author.as_deref(),
+            Some("brechanbech"),
+            "the uploader should flatten to a login, dropping the rest of the User object"
+        );
+        assert_eq!(release.assets.len(), 1);
+        assert_eq!(release.assets[0].id, Some(7));
+        assert_eq!(release.assets[0].size, Some(532_480));
+
+        // The serialized form is what reaches the model: no email, no tarball boilerplate.
+        let json = serde_json::to_string(&slimmed).unwrap();
+        assert!(!json.contains("hidden@example.com"), "author email leaked");
+        assert!(!json.contains("tarball_url"), "tarball boilerplate leaked");
+    }
+
+    #[test]
+    fn a_release_without_assets_serializes_an_empty_list() {
+        let raw = serde_json::json!([{ "id": 1, "tag_name": "v0.1.0" }]);
+        let slimmed = slim_releases(into_items(raw));
+        assert!(slimmed[0].assets.is_empty());
+    }
 
     #[test]
     fn edit_repo_body_contains_exactly_the_set_fields() {

@@ -55,6 +55,8 @@ The server is configured by environment variables:
 | `FORGEJO_WRITE_MINUTES` | no | `10` | Default write-mode window (minutes, max 60). |
 | `FORGEJO_MIRROR_TOKEN` | no | — | Credential `add_push_mirror` sends as the remote's password (e.g. a GitHub PAT). Kept out of the conversation — never passed as a tool argument. Omit if you only use `use_ssh=true` mirrors. |
 | `FORGEJO_MIGRATE_TOKEN` | no | — | Credential `migrate_repo` sends to the **source** instance it reads from. Also never passed as a tool argument. Kept separate from `FORGEJO_MIRROR_TOKEN` on purpose — that one authenticates to a push *target*, so sharing a variable would send a credential to a host it was never issued for. Omit if you only migrate public repos. |
+| `FORGEJO_UPLOAD_ROOT` | no | — | Directory `upload_release_asset` may read files from. **Uploading is disabled while this is unset** — see [Release assets](#release-assets). |
+| `FORGEJO_UPLOAD_MAX_MB` | no | `100` | Ceiling on one uploaded asset (MiB). The file is read into memory to be sent. |
 | `FORGEJO_URL` | no | `https://codeberg.org` | Instance base URL. |
 | `FORGEJO_FLAVOR` | no | `auto` | `forgejo`, `gitea`, or `auto` to detect from the instance version. Only the Actions (CI) tools consult it — see [Forgejo and Gitea](#forgejo-and-gitea). |
 
@@ -223,6 +225,9 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
 | `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
 | `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
+| `list_releases` | read | A repo's releases, newest first (auto-paginated, slimmed to identity + assets) |
+| `get_release` | read | One release by git **tag** — the lookup that makes a release script idempotent |
+| `list_release_assets` | read | A release's attached files (`id`, name, size, download URL) by `release_id` |
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
 | `create_repo` | **write** | Create a repo (defaults to private) |
@@ -237,6 +242,9 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
 | `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
 | `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
+| `create_release` | **write** | Create a release on a tag (`tag_name`; `target_commitish` creates the tag when it does not exist) |
+| `upload_release_asset` | **write** | Attach a **local file** to a release. Confined to `FORGEJO_UPLOAD_ROOT`; disabled entirely when that is unset |
+| `delete_release_asset` | **write** | Remove one asset by `attachment_id` — needed to replace a same-named file, which Forgejo would otherwise keep alongside |
 | `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run on Forgejo, an acknowledgement on Gitea |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
@@ -272,6 +280,33 @@ server sends `FORGEJO_MIGRATE_TOKEN` as the credential. As with push mirrors, th
 a tool argument, so it stays out of the conversation. See
 [Migration source token](#migration-source-token-optional) for how to mint and scope it — and
 for where it ends up, which is not where the other tokens go.
+
+### Release assets
+
+Publishing a build is three calls: look the tag up with `get_release`, `create_release` if that
+404s, then `upload_release_asset` per file. Re-running is safe as long as you delete a
+same-named asset first — Forgejo keeps both otherwise, rather than replacing.
+
+`upload_release_asset` is the only tool that reads the local disk, and whatever it reads becomes
+a publicly downloadable file. So it is confined rather than trusted:
+
+- **Off unless configured.** With `FORGEJO_UPLOAD_ROOT` unset, every upload is refused. There is
+  deliberately no fallback to the working directory: an MCP server's cwd is whatever its client
+  happened to launch it from, which is no basis for deciding what may be published.
+- **Confined to that root.** The path is resolved through symlinks *before* the check, so
+  neither a `..` traversal nor a symlink pointing out of the tree escapes it.
+- **Bounded.** Regular files only, at most `FORGEJO_UPLOAD_MAX_MB` (default 100).
+- **Plain names only.** The published name defaults to the file's own and may not contain path
+  separators, since Forgejo takes it verbatim.
+
+Point the root at the tree you actually release from, not at `$HOME`:
+
+```jsonc
+"env": {
+  "FORGEJO_UPLOAD_ROOT": "/Users/you/Developer",
+  "FORGEJO_UPLOAD_MAX_MB": "100"
+}
+```
 
 ## Forgejo vs Gitea
 
