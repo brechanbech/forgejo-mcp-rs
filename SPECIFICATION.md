@@ -517,6 +517,62 @@ Forgejo, where dispatch is verified; what is unproven is Gitea's acceptance of t
 `204` handling. Treat it as v0.17's `migrate_repo` is treated: implemented and reviewed, not yet
 proven.
 
+### v0.20.1–v0.20.3 — releases and assets
+
+| Tool | Status | Purpose |
+|---|---|---|
+| `list_releases` | **done** | A repo's releases newest first, each slimmed to what identifies it plus its downloadable assets. |
+| `get_release` | **done** | One release **by git tag** — `GET /repos/{owner}/{repo}/releases/tags/{tag}`. |
+| `list_release_assets` | **done** | The files attached to one release, by `release_id`; returns the `attachment_id` that deletion takes. |
+| `create_release` | **done** | Write-mode. `POST …/releases` with a `CreateReleaseOption`; the tag must already exist unless `target_commitish` creates it. |
+| `edit_release` | **done** | Write-mode. `PATCH …/releases/{id}` with a partial `EditReleaseOption`: `name`, `body`, `tag_name`, `target_commitish`, `draft`, `prerelease`. |
+| `upload_release_asset` | **done** | Write-mode. The one multipart endpoint, and the one local-disk read; confined to `FORGEJO_UPLOAD_ROOT`. |
+| `delete_release_asset` | **done** | Write-mode. Detach one file by `attachment_id`. |
+
+All seven paths are identical on Forgejo and Gitea, request and response shape alike, so not one
+of them consults `Flavor` — releases are among the endpoints the fork did not touch.
+
+**Addressed by tag, not by id.** `get_release` takes the tag because that is the only identifier
+a release script has *before* the release exists; the numeric id arrives only with the release
+itself. That makes publishing idempotent: look the tag up, `create_release` only if it 404s,
+then upload. A lookup keyed on the id would force every caller to list releases and match by
+hand, which is the same work done less reliably.
+
+**Same-named assets accumulate rather than replace.** Forgejo attaches a second file under the
+same name instead of overwriting, so a re-run silently produces two downloads with one name.
+Hence `delete_release_asset`, and hence the instruction — in the tool description and the server
+instructions both — to delete before re-uploading.
+
+**Uploading is the only thing this server does that reads the local disk**, and whatever it
+reads becomes a publicly downloadable file. So the capability is bounded rather than trusted,
+via `UploadPolicy`:
+
+- **Off unless configured.** With `FORGEJO_UPLOAD_ROOT` unset every upload is refused. There is
+  deliberately no fallback to the working directory: an MCP server's cwd is whatever its client
+  happened to launch it from, which is no basis for deciding what may be published.
+- **Confined to that root**, with the path resolved through symlinks *before* the containment
+  check, so neither a `..` traversal nor a symlink pointing out of the tree escapes it.
+- **Bounded.** Regular files only, at most `FORGEJO_UPLOAD_MAX_MB` (default 100), and a
+  published name carrying no path separators, since Forgejo takes it verbatim.
+
+**The 404 that reads as something it is not** (v0.20.2). Every release endpoint returns `404`
+when a repository has the Releases *unit* switched off — reads included, anonymously included.
+Taken at face value that says "no release for that tag", which sends a caller straight into
+`create_release`, which 404s in turn for a reason nothing has named. `release_404_hint` states
+both readings and names the fix: check `has_releases` via `get_repo`, then turn the unit on with
+`edit_repo`. That diagnosis is also why v0.20.2 widened `edit_repo` to reach *every* repository
+unit — the one setting that unblocks the release tools was the one setting this server could not
+reach, so the remedy it pointed at meant leaving for the web UI.
+
+**`edit_release` sends only the fields it was given** (v0.20.3), on the same principle as
+`edit_repo`: a `PATCH` filling in defaults for the rest would overwrite whatever the release
+already said, so a call meaning to correct a title would take the release notes with it. Nothing
+to change is refused with `invalid_params` rather than issuing a no-op `PATCH`. It exists because
+release notes get written before a build finishes and are therefore routinely wrong once it has
+— the motivating case was notes instructing readers to strip a quarantine flag from a tarball
+that had since been signed and notarized — and the only alternative this server offered was
+deleting the release and recreating it, which takes its assets with it.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -615,5 +671,9 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
 10. **v0.20.0** — Gitea support: automatic flavor detection, per-flavor Actions requests, and a
     normalized workflow-run shape across both forges. *(done; Actions tools not yet exercised
     against a live Gitea instance)*
-11. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
+11. **v0.20.1–v0.20.3** — releases: the seven release and asset tools, `edit_repo` widened to
+    reach every repository unit (`has_releases` being the one the release tools need), and
+    `edit_release` for correcting published notes without destroying a release's assets.
+    *(done)*
+12. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
     Non-goals), and slimming what still passes through raw.
