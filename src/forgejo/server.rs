@@ -263,7 +263,7 @@ impl ForgejoMcp {
 
     /// Gets one repository's details.
     #[tool(
-        description = "Get one repository's details (owner/repo), including its default branch and size (KiB)"
+        description = "Get one repository's details (owner/repo): default branch, size (KiB), and the unit toggles (has_issues, has_pull_requests, has_wiki, has_releases, has_actions, has_packages, has_projects). A unit that is off 404s its whole endpoint family rather than returning empty, so this is where to check when a release or workflow tool reports a repository that plainly exists as missing."
     )]
     async fn get_repo(
         &self,

@@ -255,8 +255,37 @@ pub async fn get_repo(forge: &Forge, params: RepoRef) -> Result<CallToolResult, 
         .get_repo(&params.owner, &params.repo)
         .await
         .map_err(to_mcp)?;
-    let summary: RepoSummary = decode(repo)?;
-    json_result(&summary)
+    let detail: RepoDetail = decode(repo)?;
+    json_result(&detail)
+}
+
+/// One repository in detail: the list summary plus the unit toggles.
+///
+/// The toggles are the read side of `edit_repo`'s unit flags, and the answer that
+/// [`release_404_hint`] sends a caller looking for. A unit that is off 404s its whole endpoint
+/// family rather than returning empty results, so "is it switched off?" has to be a question a
+/// caller can actually ask — a hint naming a field no tool returns is a dead end.
+///
+/// They stay out of [`RepoSummary`] on purpose: a repo *listing* does not need seven booleans
+/// per row, and the point of the summary is that the whole set stays compact.
+#[derive(Debug, serde::Deserialize, Serialize)]
+struct RepoDetail {
+    #[serde(flatten)]
+    summary: RepoSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_issues: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_pull_requests: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_wiki: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_releases: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_actions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_packages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_projects: Option<bool>,
 }
 
 /// A branch reduced to its name, head commit, and protection flag.
@@ -2969,6 +2998,32 @@ mod tests {
         assert!(v.get("permissions").is_none());
         // Absent optional fields are omitted, not serialized as null.
         assert!(v.get("private").is_none());
+    }
+
+    #[test]
+    fn get_repo_detail_carries_the_unit_toggles() {
+        // The toggles are what release_404_hint tells a caller to go and check, so a repo read
+        // that dropped them would make that hint unfollowable.
+        let raw = serde_json::json!({
+            "full_name": "brechanbech/forgejo-mcp-rs",
+            "has_issues": true,
+            "has_releases": false,
+            "has_actions": true,
+            "owner": { "login": "brechanbech" }
+        });
+        let detail: RepoDetail = serde_json::from_value(raw).unwrap();
+        let v = serde_json::to_value(&detail).unwrap();
+
+        // Flattened summary fields still come through.
+        assert_eq!(v["full_name"], "brechanbech/forgejo-mcp-rs");
+        assert!(v.get("owner").is_none());
+        // And the toggles, including the false one that is the whole point.
+        assert_eq!(v["has_issues"], true);
+        assert_eq!(v["has_releases"], false);
+        assert_eq!(v["has_actions"], true);
+        // Toggles the API did not send stay omitted rather than defaulting to false, which
+        // would assert a unit is off when we simply were not told.
+        assert!(v.get("has_wiki").is_none());
     }
 
     #[test]

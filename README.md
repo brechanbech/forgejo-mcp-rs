@@ -213,7 +213,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
 | `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default) |
 | `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default) |
-| `get_repo` | read | One repository's details (incl. default branch and size in KiB), slimmed |
+| `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
 | `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
 | `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). Optional `start_line`/`end_line` take a 1-indexed inclusive window, clamped to the file; `total_lines` is always reported |
 | `search_repos` | read | Repository search by keyword |

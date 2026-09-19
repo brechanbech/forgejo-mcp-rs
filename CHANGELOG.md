@@ -22,6 +22,15 @@ records what changed, that one records why.
   it. `PATCH /repos/{owner}/{repo}/releases/{id}` is identical on Forgejo and Gitea, request and
   response alike, so it needs no per-flavor translation.
 
+### Fixed
+
+- **`get_repo` now reports the unit toggles** — `has_issues`, `has_pull_requests`, `has_wiki`,
+  `has_releases`, `has_actions`, `has_packages`, `has_projects`. 0.20.2 taught the release-404
+  error to say "check `has_releases` via `get_repo`", but the repo read never returned that
+  field, so the advice named a dead end: the only way to answer the question was the web UI, the
+  very thing the hint was added to avoid. The toggles live on a new `RepoDetail` shape rather
+  than in `RepoSummary`, so a repository *listing* does not grow seven booleans per row.
+
 ## [0.20.2] — 2026-09-18
 
 ### Added

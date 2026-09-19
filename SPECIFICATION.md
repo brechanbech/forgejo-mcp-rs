@@ -559,7 +559,8 @@ via `UploadPolicy`:
 when a repository has the Releases *unit* switched off — reads included, anonymously included.
 Taken at face value that says "no release for that tag", which sends a caller straight into
 `create_release`, which 404s in turn for a reason nothing has named. `release_404_hint` states
-both readings and names the fix: check `has_releases` via `get_repo`, then turn the unit on with
+both readings and names the fix: check `has_releases` via `get_repo` — which reports the unit
+toggles for exactly this reason — then turn the unit on with
 `edit_repo`. That diagnosis is also why v0.20.2 widened `edit_repo` to reach *every* repository
 unit — the one setting that unblocks the release tools was the one setting this server could not
 reach, so the remedy it pointed at meant leaving for the web UI.
