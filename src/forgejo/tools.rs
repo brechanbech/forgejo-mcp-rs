@@ -1747,6 +1747,38 @@ pub struct CreateReleaseParams {
     pub prerelease: Option<bool>,
 }
 
+/// Parameters for the `edit_release` tool.
+///
+/// Everything but the release's address is optional, and only what the caller gives is sent:
+/// this edits a release in place, so omitting a field has to leave it alone.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct EditReleaseParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Release id, from `get_release` or `list_releases`.
+    pub release_id: i64,
+    /// New release title.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// New release notes (markdown). Replaces the existing notes wholesale.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Move the release onto a different git tag.
+    #[serde(default)]
+    pub tag_name: Option<String>,
+    /// Commit, branch or ref the tag points at.
+    #[serde(default)]
+    pub target_commitish: Option<String>,
+    /// Switch draft state.
+    #[serde(default)]
+    pub draft: Option<bool>,
+    /// Switch pre-release state.
+    #[serde(default)]
+    pub prerelease: Option<bool>,
+}
+
 /// Parameters for the `upload_release_asset` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct UploadReleaseAssetParams {
@@ -2004,6 +2036,58 @@ pub async fn create_release(
         .create_release(&params.owner, &params.repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
+    json_result(&release)
+}
+
+/// Edits an existing release in place — its notes, title, tag, or draft/pre-release state.
+///
+/// Only the fields the caller supplied go into the request. A PATCH that filled in defaults for
+/// the rest would overwrite whatever the release already said, which for a call meaning to fix
+/// the title would mean losing the release notes.
+///
+/// This is the tool for correcting published notes. The alternative — delete the release and
+/// recreate it — takes its assets with it.
+pub async fn edit_release(
+    forge: &Forge,
+    params: EditReleaseParams,
+) -> Result<CallToolResult, McpError> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = params.name {
+        body.insert("name".to_owned(), Value::String(name));
+    }
+    if let Some(notes) = params.body {
+        body.insert("body".to_owned(), Value::String(notes));
+    }
+    if let Some(tag) = params.tag_name {
+        body.insert("tag_name".to_owned(), Value::String(tag));
+    }
+    if let Some(target) = params.target_commitish {
+        body.insert("target_commitish".to_owned(), Value::String(target));
+    }
+    if let Some(draft) = params.draft {
+        body.insert("draft".to_owned(), Value::Bool(draft));
+    }
+    if let Some(prerelease) = params.prerelease {
+        body.insert("prerelease".to_owned(), Value::Bool(prerelease));
+    }
+    if body.is_empty() {
+        return Err(McpError::invalid_params(
+            "nothing to change: pass at least one of name, body, tag_name, target_commitish, \
+             draft or prerelease"
+                .to_owned(),
+            None,
+        ));
+    }
+
+    let release = forge
+        .edit_release(
+            &params.owner,
+            &params.repo,
+            params.release_id,
+            &Value::Object(body),
+        )
+        .await
+        .map_err(|e| release_404_hint(e, &params.owner, &params.repo))?;
     json_result(&release)
 }
 

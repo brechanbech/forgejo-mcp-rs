@@ -8,6 +8,20 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.20.3] — 2026-09-19
+
+### Added
+
+- **`edit_release`** — edit a release in place by `release_id`: `body` (the notes), `name`,
+  `tag_name`, `target_commitish`, `draft` and `prerelease`. Only the fields passed are sent, so
+  omitting one leaves it unchanged; a PATCH that filled in defaults for the rest would blank
+  whatever the release already said. Release notes written before a build is finished are
+  routinely wrong once it is — the case that prompted this was notes telling readers to clear a
+  quarantine flag from a tarball that had since been signed and notarized — and the only route
+  this server offered was deleting the release and recreating it, which takes its assets with
+  it. `PATCH /repos/{owner}/{repo}/releases/{id}` is identical on Forgejo and Gitea, request and
+  response alike, so it needs no per-flavor translation.
+
 ## [0.20.2] — 2026-09-18
 
 ### Added

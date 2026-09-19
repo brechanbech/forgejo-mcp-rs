@@ -683,6 +683,21 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    /// Edits an existing release in place.
+    #[tool(
+        description = "Edit an existing release in place, by release_id (requires write mode): name, body (the release notes), tag_name, target_commitish, draft, prerelease. Only the fields you pass are sent, so omitting one leaves it as it is. Reach for this to correct published release notes — deleting and recreating the release would take its assets with it. Same endpoint and response on Forgejo and Gitea."
+    )]
+    async fn edit_release(
+        &self,
+        Parameters(params): Parameters<tools::EditReleaseParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::edit_release(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
     /// Uploads a local file as a release asset.
     #[tool(
         description = "Upload a local file as a release asset (requires write mode). Give release_id and file_path; the published name defaults to the file's own. The file must resolve inside the server's FORGEJO_UPLOAD_ROOT — uploads are refused outright when that is unset, since whatever is read becomes publicly downloadable. Forgejo keeps same-named assets side by side, so delete the old one first when replacing."
@@ -764,9 +779,12 @@ impl ServerHandler for ForgejoMcp {
              mode, runs asynchronously (poll get_repo), leaves the source untouched, and takes \
              any source credential from FORGEJO_MIGRATE_TOKEN — again never as an argument. \
              Releases: list_releases, get_release (by tag) and list_release_assets are \
-             read-only; create_release, upload_release_asset and delete_release_asset require \
-             write mode. To publish a build, look the tag up with get_release first and create \
-             it only if that 404s — that keeps a re-run idempotent. Forgejo keeps same-named \
+             read-only; create_release, edit_release, upload_release_asset and \
+             delete_release_asset require write mode. To publish a build, look the tag up \
+             with get_release first and create it only if that 404s — that keeps a re-run \
+             idempotent. Correct published release notes with edit_release rather than \
+             deleting and recreating the release, which would drop its assets; it sends \
+             only the fields you pass, so omitting one leaves it unchanged. Forgejo keeps same-named \
              assets side by side rather than replacing them, so delete the old asset before \
              uploading its replacement. upload_release_asset reads a LOCAL file and publishes \
              it: it works only inside the server's FORGEJO_UPLOAD_ROOT and refuses everything \

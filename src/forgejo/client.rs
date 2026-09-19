@@ -558,6 +558,23 @@ impl Forge {
             .await
     }
 
+    /// `PATCH /repos/{owner}/{repo}/releases/{id}` — edit a release in place. The body is an
+    /// `EditReleaseOption`; the response is the updated `Release`.
+    ///
+    /// Forgejo and Gitea share this endpoint verbatim, request and response alike, so unlike
+    /// the workflow-run endpoints it needs no per-flavor translation.
+    pub async fn edit_release(
+        &self,
+        owner: &str,
+        repo: &str,
+        id: i64,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .patch(&format!("repos/{owner}/{repo}/releases/{id}"), body)
+            .await
+    }
+
     /// `GET /repos/{owner}/{repo}/releases/{id}/assets` — the files attached to one release.
     pub async fn list_release_assets(
         &self,

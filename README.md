@@ -243,6 +243,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
 | `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
 | `create_release` | **write** | Create a release on a tag (`tag_name`; `target_commitish` creates the tag when it does not exist) |
+| `edit_release` | **write** | Edit a release in place by `release_id` — `body` (the notes), `name`, `tag_name`, `draft`, `prerelease`. Only the fields passed are sent, so omitting one leaves it alone |
 | `upload_release_asset` | **write** | Attach a **local file** to a release. Confined to `FORGEJO_UPLOAD_ROOT`; disabled entirely when that is unset |
 | `delete_release_asset` | **write** | Remove one asset by `attachment_id` — needed to replace a same-named file, which Forgejo would otherwise keep alongside |
 | `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run on Forgejo, an acknowledgement on Gitea |
@@ -282,6 +283,10 @@ a tool argument, so it stays out of the conversation. See
 for where it ends up, which is not where the other tokens go.
 
 ### Release assets
+
+Notes that were written before the build finished are corrected with `edit_release`, not by
+recreating the release — deleting one takes its assets with it. It sends only the fields you
+pass, so changing the `body` leaves the title and draft state untouched.
 
 Publishing a build is three calls: look the tag up with `get_release`, `create_release` if that
 404s, then `upload_release_asset` per file. Re-running is safe as long as you delete a
