@@ -318,6 +318,10 @@ fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
 /// One status reported against a commit: a CI run, a linter, whatever posted
 /// it. `creator` and the timestamps are dropped — what matters is which check
 /// this was and how it went.
+///
+/// Note that a ref accumulates one of these per *transition*, not one per
+/// check: a single job appears as queued, then running, then finished. The
+/// newest entry for a given `context` is its current state.
 #[derive(Debug, Serialize)]
 struct CommitStatusSummary {
     /// The check's name, e.g. a workflow job.
@@ -328,8 +332,11 @@ struct CommitStatusSummary {
     status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Where the run can be read, when the reporter supplied one. Forgejo
-    /// exposes no logs API, so this link is often the only way to the detail.
+    /// Where the run can be read, when the reporter supplied one. Neither
+    /// forge exposes a logs API, so this link is often the only way to the
+    /// detail — and both return it **relative** to the instance origin
+    /// (`/owner/repo/actions/runs/…`), so it needs the host prefixed before
+    /// it will resolve. Probed on codeberg.org and gitea.com alike.
     #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

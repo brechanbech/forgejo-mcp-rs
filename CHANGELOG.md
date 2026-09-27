@@ -51,8 +51,12 @@ records what changed, that one records why.
 
 - `get_commit_statuses`. The individual checks reported against a ref, where
   `get_combined_status` gives only the rolled-up verdict. `target_url` is kept
-  because no forge exposes a logs API, so the link is often the only route to
-  a failing run.
+  because neither forge exposes a logs API, so the link is often the only
+  route to a failing run — both return it relative to the instance origin, so
+  it needs the host prefixed. A ref carries one status per *transition*, not
+  per check, so the newest entry for a context is its current state; the
+  description says so, since reporting a pending check that finished ten
+  minutes ago is the obvious way to misread it.
 - `get_repo_tree`, with `recursive` to walk the whole tree in one request —
   "where is every file of this kind" without descending directory by
   directory. `truncated` is reported even when false: the forge stops early on
