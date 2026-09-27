@@ -315,6 +315,191 @@ fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
         .collect()
 }
 
+/// One commit, trimmed to what a reader needs.
+///
+/// The wire object carries `signature` and `payload` — base64 blobs running
+/// from a few hundred bytes to a couple of kilobytes *each*, per commit — plus
+/// `files` and `stats` on every listing entry. A thirty-commit page is tens of
+/// kilobytes of material nobody reads. What survives is the identity of the
+/// commit, who wrote it, and whether the forge could vouch for its signature.
+#[derive(Debug, Serialize)]
+struct CommitSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha: Option<String>,
+    /// First line only. A body can run to paragraphs and the subject is what
+    /// identifies a commit in a list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date: Option<String>,
+    /// "verified", "unverified" or "unsigned" — see [`signature_state`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    /// Who the forge says signed it, when it could tell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signer: Option<String>,
+    /// Why an existing signature did not verify: a `gpg.error.*` key on both
+    /// forges. Gitea reports `no_gpg_keys_found` both for a key it does not
+    /// have and for one it has but has not verified, so it does not
+    /// distinguish those two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// Which of the three states a commit's signature is in.
+///
+/// Keyed off the presence of a signature rather than the `reason` string: an
+/// unrecognised `gpg.error.*` still classifies correctly, and "no signature"
+/// is a different claim from "a signature that did not verify".
+fn signature_state(verification: Option<&Value>) -> Option<String> {
+    let v = verification?;
+    let signed = v
+        .get("signature")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if !signed {
+        return Some("unsigned".into());
+    }
+    let verified = v.get("verified").and_then(Value::as_bool).unwrap_or(false);
+    Some(if verified { "verified" } else { "unverified" }.into())
+}
+
+/// Trims commit objects from either endpoint — a listing entry and a single
+/// commit have the same shape on both Forgejo and Gitea.
+fn slim_commits(items: &[Value]) -> Vec<CommitSummary> {
+    items.iter().map(slim_commit).collect()
+}
+
+fn slim_commit(c: &Value) -> CommitSummary {
+    let verification = c.pointer("/commit/verification");
+    let state = signature_state(verification);
+    // Only name a signer when the forge vouched for one; on an unverified
+    // commit the field is null and on an unsigned one it means nothing.
+    let signer = match state.as_deref() {
+        Some("verified") => verification
+            .and_then(|v| v.pointer("/signer/name"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    };
+    let reason = match state.as_deref() {
+        Some("unverified") => verification
+            .and_then(|v| v.get("reason"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    };
+    CommitSummary {
+        sha: c.get("sha").and_then(Value::as_str).map(ToOwned::to_owned),
+        summary: c
+            .pointer("/commit/message")
+            .and_then(Value::as_str)
+            .map(|m| m.lines().next().unwrap_or(m).trim().to_owned()),
+        author: c
+            .pointer("/commit/author/name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        email: c
+            .pointer("/commit/author/email")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        date: c
+            .pointer("/commit/author/date")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        signature: state,
+        signer,
+        reason,
+    }
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListCommitsParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Branch, tag or commit to start from. Defaults to the repository's
+    /// default branch. A ref the forge cannot resolve answers 404.
+    #[serde(default)]
+    pub sha: Option<String>,
+    /// Limit to commits touching this path.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct GetCommitParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// The commit to fetch. A full id is safest; a branch or tag name also
+    /// resolves.
+    pub sha: String,
+}
+
+/// Lists commits on a ref (auto-paginated unless an explicit page/limit is given).
+pub async fn list_commits(
+    forge: &Forge,
+    params: ListCommitsParams,
+) -> Result<CallToolResult, McpError> {
+    if params.page.is_none() && params.limit.is_none() {
+        let all = gather_all(|page, limit| {
+            Box::pin(forge.list_commits(
+                &params.owner,
+                &params.repo,
+                params.sha.as_deref(),
+                params.path.as_deref(),
+                Some(page),
+                Some(limit),
+            ))
+        })
+        .await
+        .map_err(to_mcp)?;
+        return gathered_result(&slim_commits(&all.items), all.total, all.truncated);
+    }
+    let (commits, total) = forge
+        .list_commits(
+            &params.owner,
+            &params.repo,
+            params.sha.as_deref(),
+            params.path.as_deref(),
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    paged_result(
+        params.page,
+        params.limit,
+        total,
+        &slim_commits(&into_items(commits)),
+    )
+}
+
+/// Gets one commit, slimmed to the same fields a listing entry carries.
+pub async fn get_commit(
+    forge: &Forge,
+    params: GetCommitParams,
+) -> Result<CallToolResult, McpError> {
+    let commit = forge
+        .get_commit(&params.owner, &params.repo, &params.sha)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&slim_commit(&commit))
+}
+
 /// Lists branches in `owner/repo` (auto-paginated unless an explicit page/limit is given).
 pub async fn list_branches(
     forge: &Forge,
@@ -2966,6 +3151,105 @@ mod tests {
         let mut params = migrate_params("https://example.com/o/r.git");
         params.auth_username = Some("brechanbech".to_owned());
         assert!(migrate_repo_body(params, None).is_err());
+    }
+
+    /// Shaped like what codeberg.org and gitea.com actually return — the two
+    /// were probed and their commit objects agree field for field, so one
+    /// fixture stands for both.
+    fn commit_fixture(verification: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "sha": "117d025f357da221db0423cba321fc51605a4ea7",
+            "html_url": "https://codeberg.org/brechanbech/xojo-mcp/commit/117d025f35",
+            "commit": {
+                "message": "lookup_class: return a shaped page, not the raw source\n\nA body that runs on for paragraphs and should not reach the caller.\n",
+                "author": { "name": "Stefan Ractliffe", "email": "stefan@example.ch", "date": "2026-09-20T18:03:11Z" },
+                "committer": { "name": "Stefan Ractliffe", "email": "stefan@example.ch", "date": "2026-09-20T18:03:11Z" },
+                "tree": { "sha": "5e1", "url": "…" },
+                "verification": verification
+            },
+            // Bulk that must not survive the slim.
+            "files": [{ "filename": "src/lookup.rs" }],
+            "stats": { "additions": 412, "deletions": 90, "total": 502 },
+            "parents": [{ "sha": "e8e1b9f6b8" }]
+        })
+    }
+
+    #[test]
+    fn slim_commits_drops_the_signature_blobs_and_keeps_the_verdict() {
+        let raw = vec![commit_fixture(&serde_json::json!({
+            "verified": true,
+            "reason": "brechanbech / SHA256:j3AI4r6eQLd1dm0hTch3H0Y6Iua",
+            "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH…\n-----END SSH SIGNATURE-----\n",
+            "signer": { "name": "brechanbech", "email": "brechanbech@noreply.codeberg.org", "username": "" },
+            "payload": "tree 5e1\nparent e8e…\n"
+        }))];
+        let slim = slim_commits(&raw);
+        assert_eq!(slim.len(), 1);
+
+        let v = serde_json::to_value(&slim[0]).unwrap();
+        assert_eq!(v["sha"], "117d025f357da221db0423cba321fc51605a4ea7");
+        // The subject only: a body can run to paragraphs.
+        assert_eq!(
+            v["summary"],
+            "lookup_class: return a shaped page, not the raw source"
+        );
+        assert_eq!(v["author"], "Stefan Ractliffe");
+        assert_eq!(v["signature"], "verified");
+        assert_eq!(v["signer"], "brechanbech");
+        // The blobs and the per-commit bulk are gone — they are the whole
+        // reason this slim exists.
+        assert!(v.get("payload").is_none());
+        assert!(v.get("files").is_none());
+        assert!(v.get("stats").is_none());
+        assert!(v.get("parents").is_none());
+        // A verified commit has nothing to explain.
+        assert!(v.get("reason").is_none());
+    }
+
+    #[test]
+    fn an_unsigned_commit_is_not_an_unverified_one() {
+        // Forgejo and Gitea both answer this way for a commit nobody signed:
+        // verified false, but with an empty signature.
+        let raw = vec![commit_fixture(&serde_json::json!({
+            "verified": false,
+            "reason": "gpg.error.not_signed_commit",
+            "signature": "",
+            "signer": serde_json::Value::Null,
+            "payload": ""
+        }))];
+        let v = serde_json::to_value(&slim_commits(&raw)[0]).unwrap();
+        assert_eq!(v["signature"], "unsigned");
+        // Neither field says anything about a commit that was never signed.
+        assert!(v.get("signer").is_none());
+        assert!(v.get("reason").is_none());
+    }
+
+    #[test]
+    fn an_unverified_commit_keeps_the_reason_but_names_no_signer() {
+        let raw = vec![commit_fixture(&serde_json::json!({
+            "verified": false,
+            "reason": "gpg.error.no_gpg_keys_found",
+            "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH…\n-----END SSH SIGNATURE-----\n",
+            "signer": serde_json::Value::Null,
+            "payload": "tree 5e1\n"
+        }))];
+        let v = serde_json::to_value(&slim_commits(&raw)[0]).unwrap();
+        assert_eq!(v["signature"], "unverified");
+        assert_eq!(v["reason"], "gpg.error.no_gpg_keys_found");
+        assert!(v.get("signer").is_none());
+    }
+
+    #[test]
+    fn a_commit_with_no_verification_block_claims_nothing() {
+        // An older instance may omit it entirely.
+        let mut raw = commit_fixture(&serde_json::Value::Null);
+        raw["commit"]
+            .as_object_mut()
+            .unwrap()
+            .remove("verification");
+        let v = serde_json::to_value(&slim_commits(&[raw])[0]).unwrap();
+        assert!(v.get("signature").is_none());
+        assert_eq!(v["sha"], "117d025f357da221db0423cba321fc51605a4ea7");
     }
 
     #[test]

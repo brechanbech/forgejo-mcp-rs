@@ -223,6 +223,47 @@ impl Forge {
         self.rest.get(&format!("repos/{owner}/{repo}"), &[]).await
     }
 
+    /// `GET /repos/{owner}/{repo}/commits` — commits on a ref (paged).
+    ///
+    /// `sha` names the ref to start from — a branch, a tag or a commit id —
+    /// and defaults to the repository's default branch. Asking for one the
+    /// forge cannot resolve answers 404, not an empty list.
+    pub async fn list_commits(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: Option<&str>,
+        path: Option<&str>,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        let mut params = paging(page, limit);
+        if let Some(sha) = sha {
+            params.push(("sha", sha.to_owned()));
+        }
+        if let Some(path) = path {
+            params.push(("path", path.to_owned()));
+        }
+        self.rest
+            .get_list(&format!("repos/{owner}/{repo}/commits"), &params)
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/git/commits/{sha}` — one commit.
+    ///
+    /// Forgejo and Gitea answer this with the same shape as a listing entry,
+    /// verification block included, so both go through one summary.
+    pub async fn get_commit(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .get(&format!("repos/{owner}/{repo}/git/commits/{sha}"), &[])
+            .await
+    }
+
     /// `GET /repos/{owner}/{repo}/branches` — branches (paged).
     pub async fn list_branches(
         &self,

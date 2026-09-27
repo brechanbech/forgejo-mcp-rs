@@ -272,6 +272,28 @@ impl ForgejoMcp {
         tools::get_repo(&self.forgejo, params).await
     }
 
+    /// Lists commits on a ref.
+    #[tool(
+        description = "List commits in a repository (owner/repo), newest first; optional sha (branch, tag or commit to start from; defaults to the default branch) and path to filter by file. Auto-paginated. Slimmed to sha, subject line, author, date and signature state — the raw objects carry base64 signature and payload blobs, plus per-commit files and stats, that dwarf everything worth reading. `signature` is \"verified\", \"unverified\" or \"unsigned\": unsigned means no signature was presented at all, which is a different thing from one that failed to verify."
+    )]
+    async fn list_commits(
+        &self,
+        Parameters(params): Parameters<tools::ListCommitsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_commits(&self.forgejo, params).await
+    }
+
+    /// Gets one commit.
+    #[tool(
+        description = "Get one commit (owner/repo/sha), slimmed to the same fields as list_commits. Use it to check whether a commit was signed and whether the forge could verify it: `signature` is \"verified\", \"unverified\" or \"unsigned\", with `signer` on a verified one and `reason` (a gpg.error.* key) on an unverified one. Note that Gitea reports gpg.error.no_gpg_keys_found both for a key it does not hold and for one it holds but has not verified, so that reason does not distinguish the two."
+    )]
+    async fn get_commit(
+        &self,
+        Parameters(params): Parameters<tools::GetCommitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_commit(&self.forgejo, params).await
+    }
+
     /// Lists branches in a repository.
     #[tool(description = "List branches in a repository (owner/repo); auto-paginated, slimmed")]
     async fn list_branches(

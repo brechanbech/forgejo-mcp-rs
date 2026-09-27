@@ -8,6 +8,31 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [Unreleased]
+
+### Added
+- `list_commits` and `get_commit`. The server could name a branch's head but
+  could not read a single commit — no message, author or signature — which
+  made questions about signing unanswerable without leaving the tools.
+- Both are slimmed like the rest: sha, subject line, author, date and a
+  signature verdict. The wire objects carry base64 `signature` and `payload`
+  blobs of a few hundred bytes to a couple of kilobytes *each*, plus `files`
+  and `stats` on every listing entry; a thirty-commit page is tens of
+  kilobytes of material nobody reads.
+- `signature` is `verified`, `unverified` or `unsigned`, decided by whether a
+  signature is present rather than by the `reason` string, so an unrecognised
+  `gpg.error.*` still classifies correctly. `signer` appears only on a
+  verified commit and `reason` only on an unverified one — neither says
+  anything about a commit nobody signed.
+
+### Notes
+- Forgejo (codeberg.org) and Gitea (gitea.com) were probed directly: both
+  endpoints return the same shape, field for field, including the
+  verification block, so one summary serves both. The *semantics* differ —
+  Gitea reports `gpg.error.no_gpg_keys_found` both for a key it does not hold
+  and for one it holds but has not verified, which the tool description says
+  so a caller does not over-read it.
+
 ## [0.20.3] — 2026-09-19
 
 ### Added

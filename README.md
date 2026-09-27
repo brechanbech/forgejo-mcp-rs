@@ -215,6 +215,8 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default) |
 | `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
 | `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
+| `list_commits` | read | Commits on a ref (`owner/repo`, optional `sha` and `path`; auto-paginated). Slimmed to sha, subject, author, date and signature state — the raw objects carry base64 `signature`/`payload` blobs and per-commit `files`/`stats` |
+| `get_commit` | read | One commit (`owner/repo/sha`), same fields. `signature` is `verified`, `unverified` or `unsigned`; `signer` on the first, `reason` on the second |
 | `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). Optional `start_line`/`end_line` take a 1-indexed inclusive window, clamped to the file; `total_lines` is always reported |
 | `search_repos` | read | Repository search by keyword |
 | `list_orgs` | read | Organizations you belong to |
