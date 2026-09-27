@@ -272,6 +272,17 @@ impl ForgejoMcp {
         tools::get_repo(&self.forgejo, params).await
     }
 
+    /// Lists an account's SSH and GPG keys.
+    #[tool(
+        description = "List an account's SSH and GPG keys (omit username for the authenticated user). Answers whether this instance can verify a signature: a key must be present AND `verified` — verified false means the forge holds the key but has not confirmed ownership, and commits signed with it still read as unverified. Gitea reports gpg.error.no_gpg_keys_found for both cases, so check here rather than inferring from a commit's reason. GPG entries carry the addresses the key covers and whether each is activated; a signature only verifies for a commit authored under an activated address. Key material and armored blobs are dropped — fingerprints and key ids identify them."
+    )]
+    async fn list_keys(
+        &self,
+        Parameters(params): Parameters<tools::ListKeysParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_keys(&self.forgejo, params).await
+    }
+
     /// Lists commits on a ref.
     #[tool(
         description = "List commits in a repository (owner/repo), newest first; optional sha (branch, tag or commit to start from; defaults to the default branch) and path to filter by file. Auto-paginated. Slimmed to sha, subject line, author, date and signature state — the raw objects carry base64 signature and payload blobs, plus per-commit files and stats, that dwarf everything worth reading. `signature` is \"verified\", \"unverified\" or \"unsigned\": unsigned means no signature was presented at all, which is a different thing from one that failed to verify."

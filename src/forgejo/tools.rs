@@ -315,6 +315,147 @@ fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
         .collect()
 }
 
+/// One SSH key, trimmed. The key material itself is dropped — the fingerprint
+/// identifies it and the blob is a hundred-odd characters nobody compares by
+/// eye.
+#[derive(Debug, Serialize)]
+struct SshKeySummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_type: Option<String>,
+    /// Whether the key has been verified with a signed token. **A key that is
+    /// merely present does not verify commits** — the forge shows "Verified
+    /// Key" only once this is true, and until then commits signed with it read
+    /// as unverified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_only: Option<bool>,
+}
+
+/// One GPG key, trimmed. `public_key` is an armored blob and `subkeys` nests
+/// another copy of all of this; neither survives.
+#[derive(Debug, Serialize)]
+struct GpgKeySummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_sign: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    /// The addresses this key is good for, and whether each is activated. A
+    /// signature only verifies for a commit authored under an activated
+    /// address, so this is half the answer to "why is my commit unverified".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    emails: Vec<GpgEmail>,
+}
+
+#[derive(Debug, Serialize)]
+struct GpgEmail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified: Option<bool>,
+}
+
+/// Both key lists for one account.
+#[derive(Debug, Serialize)]
+struct KeyListing {
+    ssh: Vec<SshKeySummary>,
+    gpg: Vec<GpgKeySummary>,
+}
+
+fn slim_ssh_keys(items: &[Value]) -> Vec<SshKeySummary> {
+    items
+        .iter()
+        .map(|k| SshKeySummary {
+            id: k.get("id").and_then(Value::as_i64),
+            title: k
+                .get("title")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            fingerprint: k
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            key_type: k
+                .get("key_type")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            verified: k.get("verified").and_then(Value::as_bool),
+            read_only: k.get("read_only").and_then(Value::as_bool),
+        })
+        .collect()
+}
+
+fn slim_gpg_keys(items: &[Value]) -> Vec<GpgKeySummary> {
+    items
+        .iter()
+        .map(|k| GpgKeySummary {
+            id: k.get("id").and_then(Value::as_i64),
+            key_id: k
+                .get("key_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            verified: k.get("verified").and_then(Value::as_bool),
+            can_sign: k.get("can_sign").and_then(Value::as_bool),
+            expires_at: k
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            emails: k
+                .get("emails")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .map(|e| GpgEmail {
+                            email: e
+                                .get("email")
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned),
+                            verified: e.get("verified").and_then(Value::as_bool),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListKeysParams {
+    /// Whose keys to list. Omit for the authenticated user, which is the only
+    /// list that reliably carries `verified`.
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+/// Lists an account's SSH and GPG keys, both kinds in one answer.
+pub async fn list_keys(forge: &Forge, params: ListKeysParams) -> Result<CallToolResult, McpError> {
+    let username = params.username.as_deref();
+    let (ssh, _) = forge
+        .list_ssh_keys(username, None, Some(50))
+        .await
+        .map_err(to_mcp)?;
+    let (gpg, _) = forge
+        .list_gpg_keys(username, None, Some(50))
+        .await
+        .map_err(to_mcp)?;
+    json_result(&KeyListing {
+        ssh: slim_ssh_keys(&into_items(ssh)),
+        gpg: slim_gpg_keys(&into_items(gpg)),
+    })
+}
+
 /// One commit, trimmed to what a reader needs.
 ///
 /// The wire object carries `signature` and `payload` — base64 blobs running
@@ -3172,6 +3313,75 @@ mod tests {
             "stats": { "additions": 412, "deletions": 90, "total": 502 },
             "parents": [{ "sha": "e8e1b9f6b8" }]
         })
+    }
+
+    #[test]
+    fn slim_ssh_keys_keeps_the_verified_flag_and_drops_the_key_material() {
+        // The shape /user/keys returns. `verified` is the field that decides
+        // whether commits signed with this key can verify at all.
+        let raw = vec![serde_json::json!({
+            "id": 12345,
+            "title": "MacBook Pro M1 Max",
+            "fingerprint": "SHA256:j3AI4r6eQLd1dm0hTch3H0Y6Iua/1Em7un58XAoIocg",
+            "key_type": "ssh",
+            "verified": false,
+            "read_only": false,
+            "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILongBlobNobodyReadsByEye codeberg",
+            "user": { "login": "brechanbech", "email": "person@example.com" }
+        })];
+        let v = serde_json::to_value(&slim_ssh_keys(&raw)[0]).unwrap();
+        assert_eq!(
+            v["fingerprint"],
+            "SHA256:j3AI4r6eQLd1dm0hTch3H0Y6Iua/1Em7un58XAoIocg"
+        );
+        assert_eq!(v["verified"], false);
+        // A present-but-unverified key is the case this tool exists to expose.
+        assert_eq!(v["title"], "MacBook Pro M1 Max");
+        // The blob and the nested user (with their email) are dropped.
+        assert!(v.get("key").is_none());
+        assert!(v.get("user").is_none());
+    }
+
+    #[test]
+    fn slim_gpg_keys_keeps_the_addresses_the_key_covers() {
+        let raw = vec![serde_json::json!({
+            "id": 99,
+            "key_id": "ABCDEF0123456789",
+            "verified": true,
+            "can_sign": true,
+            "expires_at": "2027-01-01T00:00:00Z",
+            "emails": [
+                { "email": "stefan.ractliffe@metrakol.ch", "verified": true },
+                { "email": "old@example.com", "verified": false }
+            ],
+            "public_key": "-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQINBF…\n",
+            "subkeys": [{ "id": 100, "key_id": "FEDCBA9876543210" }]
+        })];
+        let v = serde_json::to_value(&slim_gpg_keys(&raw)[0]).unwrap();
+        assert_eq!(v["key_id"], "ABCDEF0123456789");
+        assert_eq!(v["can_sign"], true);
+        // Which addresses are activated is half the answer to an unverified
+        // commit, so the list survives.
+        assert_eq!(v["emails"][0]["email"], "stefan.ractliffe@metrakol.ch");
+        assert_eq!(v["emails"][0]["verified"], true);
+        assert_eq!(v["emails"][1]["verified"], false);
+        // The armored blob and the nested subkey copies do not.
+        assert!(v.get("public_key").is_none());
+        assert!(v.get("subkeys").is_none());
+    }
+
+    #[test]
+    fn a_key_list_with_no_verified_flag_says_nothing_rather_than_false() {
+        // Another user's public list may omit it; absent must not read as
+        // "not verified".
+        let raw = vec![serde_json::json!({
+            "id": 1,
+            "title": "someone else",
+            "fingerprint": "SHA256:abc",
+            "key_type": "ssh"
+        })];
+        let v = serde_json::to_value(&slim_ssh_keys(&raw)[0]).unwrap();
+        assert!(v.get("verified").is_none());
     }
 
     #[test]

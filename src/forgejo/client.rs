@@ -223,6 +223,38 @@ impl Forge {
         self.rest.get(&format!("repos/{owner}/{repo}"), &[]).await
     }
 
+    /// `GET /user/keys` or `GET /users/{username}/keys` — SSH keys.
+    ///
+    /// Without a username this is the authenticated user's own list, which is
+    /// the one that carries `verified`. Another user's list is public
+    /// information and may omit it.
+    pub async fn list_ssh_keys(
+        &self,
+        username: Option<&str>,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        let path = match username {
+            Some(u) => format!("users/{u}/keys"),
+            None => "user/keys".to_owned(),
+        };
+        self.rest.get_list(&path, &paging(page, limit)).await
+    }
+
+    /// `GET /user/gpg_keys` or `GET /users/{username}/gpg_keys` — GPG keys.
+    pub async fn list_gpg_keys(
+        &self,
+        username: Option<&str>,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        let path = match username {
+            Some(u) => format!("users/{u}/gpg_keys"),
+            None => "user/gpg_keys".to_owned(),
+        };
+        self.rest.get_list(&path, &paging(page, limit)).await
+    }
+
     /// `GET /repos/{owner}/{repo}/commits` — commits on a ref (paged).
     ///
     /// `sha` names the ref to start from — a branch, a tag or a commit id —

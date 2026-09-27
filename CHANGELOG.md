@@ -25,6 +25,18 @@ records what changed, that one records why.
   verified commit and `reason` only on an unverified one — neither says
   anything about a commit nobody signed.
 
+- `list_keys`. Both key kinds for an account in one answer, because "can this
+  instance verify my commits" needs both. `verified` is the field that matters
+  and is easy to miss: a key the forge holds but has not confirmed ownership of
+  verifies nothing, and Gitea reports `gpg.error.no_gpg_keys_found` whether the
+  key is absent or merely unverified — so the commit's reason cannot tell those
+  apart and this can. GPG entries keep the addresses the key covers and whether
+  each is activated, since a signature only verifies for a commit authored
+  under an activated address.
+- Key material is dropped: an SSH blob is a hundred-odd characters nobody
+  compares by eye, and a GPG `public_key` is an armored block with `subkeys`
+  nesting another copy of everything. Fingerprints and key ids identify them.
+
 ### Notes
 - Forgejo (codeberg.org) and Gitea (gitea.com) were probed directly: both
   endpoints return the same shape, field for field, including the
