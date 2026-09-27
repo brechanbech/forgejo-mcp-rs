@@ -220,6 +220,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_keys` | read | An account's SSH and GPG keys (omit `username` for yourself). `verified` decides whether a signature can verify at all — but **Gitea omits the field on SSH keys**, so absent means unreported, not unverified. GPG entries carry the addresses the key covers and whether each is activated |
 | `list_branch_protections` | read | A repository's protection rules: what each enforces (`require_signed_commits`, direct pushes, approvals, status checks) for a branch name or glob. Allowlists omitted; an empty list means nothing is protected |
 | `get_commit_statuses` | read | Individual statuses against a commit/branch/tag: context, status, description, `target_url`. `get_combined_status` rolls these into one verdict |
+| `get_combined_status` | read | The rolled-up CI verdict for a ref — one state plus the latest per check. The tool for "did CI pass?"; `get_commit_statuses` gives the transition history |
 | `get_repo_tree` | read | A repository's git tree (optional `sha`, `recursive`). Entries are path/type/size/sha; check `truncated` before concluding a file is absent |
 | `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). Optional `start_line`/`end_line` take a 1-indexed inclusive window, clamped to the file; `total_lines` is always reported |
 | `search_repos` | read | Repository search by keyword |

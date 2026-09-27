@@ -223,6 +223,28 @@ impl Forge {
         self.rest.get(&format!("repos/{owner}/{repo}"), &[]).await
     }
 
+    /// `GET /repos/{owner}/{repo}/commits/{ref}/status` — the rolled-up
+    /// verdict for a ref.
+    ///
+    /// An early `ci_status` tool on this endpoint was removed in v0.12 because
+    /// it answered `state: ""` with `total_count: 0` for Actions repositories.
+    /// That is no longer so on either forge — probed 27 September 2026,
+    /// Codeberg answering `pending`/2 and gitea.com `success`/4 — so the
+    /// endpoint is useful again.
+    pub async fn get_combined_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .get(
+                &format!("repos/{owner}/{repo}/commits/{git_ref}/status"),
+                &[],
+            )
+            .await
+    }
+
     /// `GET /repos/{owner}/{repo}/commits/{ref}/statuses` — every status
     /// reported against a commit.
     ///

@@ -315,6 +315,65 @@ fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
         .collect()
 }
 
+/// The rolled-up verdict for a ref: one state, plus the checks behind it.
+#[derive(Debug, Serialize)]
+struct CombinedStatusSummary {
+    /// `success`, `pending`, `failure`, `error` or `warning`. Empty on an
+    /// instance that reports nothing for the ref, in which case it is dropped
+    /// rather than returned blank.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha: Option<String>,
+    total_count: i64,
+    /// The latest state per check, not the full transition history that
+    /// `get_commit_statuses` returns.
+    statuses: Vec<CommitStatusSummary>,
+}
+
+fn slim_combined_status(raw: &Value) -> CombinedStatusSummary {
+    CombinedStatusSummary {
+        state: raw
+            .get("state")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        sha: raw
+            .get("sha")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        total_count: raw.get("total_count").and_then(Value::as_i64).unwrap_or(0),
+        statuses: raw
+            .get("statuses")
+            .and_then(Value::as_array)
+            .map(|list| slim_commit_statuses(list))
+            .unwrap_or_default(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CombinedStatusParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// The commit, branch or tag to judge.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+}
+
+/// The one-line answer to "did CI pass for this ref".
+pub async fn get_combined_status(
+    forge: &Forge,
+    params: CombinedStatusParams,
+) -> Result<CallToolResult, McpError> {
+    let raw = forge
+        .get_combined_status(&params.owner, &params.repo, &params.git_ref)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&slim_combined_status(&raw))
+}
+
 /// One status reported against a commit: a CI run, a linter, whatever posted
 /// it. `creator` and the timestamps are dropped — what matters is which check
 /// this was and how it went.
@@ -3597,6 +3656,46 @@ mod tests {
             "stats": { "additions": 412, "deletions": 90, "total": 502 },
             "parents": [{ "sha": "e8e1b9f6b8" }]
         })
+    }
+
+    #[test]
+    fn slim_combined_status_keeps_one_verdict_and_the_checks_behind_it() {
+        // The shape both forges returned on 27 September 2026 for a repository
+        // whose CI is Actions — the case an earlier ci_status tool was dropped
+        // over, when it answered state:"" with total_count 0.
+        let raw = serde_json::json!({
+            "state": "success",
+            "sha": "117d025f357da221db0423cba321fc51605a4ea7",
+            "total_count": 2,
+            "statuses": [
+                { "context": "CI / check (push)", "status": "success", "description": "Successful in 1m2s",
+                  "target_url": "/brechanbech/forgejo-mcp-rs/actions/runs/32/jobs/0" },
+                { "context": "CI / deny (push)", "status": "success", "description": "Successful in 48s",
+                  "target_url": "/brechanbech/forgejo-mcp-rs/actions/runs/32/jobs/1" }
+            ],
+            "commit_url": "https://codeberg.org/api/v1/…",
+            "repository": { "full_name": "brechanbech/forgejo-mcp-rs", "owner": { "email": "x@y.z" } },
+            "url": "https://codeberg.org/api/v1/…"
+        });
+        let v = serde_json::to_value(slim_combined_status(&raw)).unwrap();
+        assert_eq!(v["state"], "success");
+        assert_eq!(v["total_count"], 2);
+        assert_eq!(v["statuses"][0]["context"], "CI / check (push)");
+        // The repository object (with its owner's email) and the api urls go.
+        assert!(v.get("repository").is_none());
+        assert!(v.get("commit_url").is_none());
+        assert!(v.get("url").is_none());
+    }
+
+    #[test]
+    fn an_empty_combined_state_is_dropped_rather_than_reported_blank() {
+        // What the endpoint used to answer for Actions repositories, and may
+        // still answer for a ref nothing has reported on.
+        let raw = serde_json::json!({ "state": "", "total_count": 0, "statuses": [] });
+        let v = serde_json::to_value(slim_combined_status(&raw)).unwrap();
+        assert!(v.get("state").is_none());
+        assert_eq!(v["total_count"], 0);
+        assert_eq!(v["statuses"].as_array().unwrap().len(), 0);
     }
 
     #[test]

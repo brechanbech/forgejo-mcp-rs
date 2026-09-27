@@ -272,9 +272,20 @@ impl ForgejoMcp {
         tools::get_repo(&self.forgejo, params).await
     }
 
+    /// The rolled-up CI verdict for a ref.
+    #[tool(
+        description = "The rolled-up CI verdict for a commit, branch or tag (owner/repo/ref): one state — success, pending, failure, error or warning — with the latest state per check behind it. This is the tool for \"did CI pass?\". get_commit_statuses returns the full transition history instead, which is the wrong shape for that question. state is omitted when the instance reports nothing for the ref. Both forges return target_url relative to the instance origin, so prefix the host before following it."
+    )]
+    async fn get_combined_status(
+        &self,
+        Parameters(params): Parameters<tools::CombinedStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_combined_status(&self.forgejo, params).await
+    }
+
     /// Lists every status reported against a commit.
     #[tool(
-        description = "List the statuses reported against a commit, branch or tag (owner/repo/ref): each check's context, status (success, pending, failure, error, warning), description and target_url. Every transition is recorded, so one ref carries a history rather than a state: the same context appears as 'Waiting to run', then 'In progress', then its result. The newest entry per context is the current verdict — get_combined_status collapses them if that is the question. Neither Forgejo nor Gitea exposes a logs API, so target_url is often the only route to a failing run's detail; both return it relative to the instance origin, so prefix the host before following it. Creator and timestamps beyond updated_at are dropped."
+        description = "List the statuses reported against a commit, branch or tag (owner/repo/ref): each check's context, status (success, pending, failure, error, warning), description and target_url. Every transition is recorded, so one ref carries a history rather than a state: the same context appears as 'Waiting to run', then 'In progress', then its result. The newest entry per context is the current verdict — for \"did CI pass?\" call get_combined_status instead, which returns one state with the latest per check. Neither Forgejo nor Gitea exposes a logs API, so target_url is often the only route to a failing run's detail; both return it relative to the instance origin, so prefix the host before following it. Creator and timestamps beyond updated_at are dropped."
     )]
     async fn get_commit_statuses(
         &self,

@@ -8,7 +8,7 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
-## [Unreleased]
+## [0.20.4] — 2026-09-27
 
 ### Added
 - `list_commits` and `get_commit`. The server could name a branch's head but
@@ -62,6 +62,12 @@ records what changed, that one records why.
   directory. `truncated` is reported even when false: the forge stops early on
   a large tree, and concluding a file is absent from a truncated listing is
   unsound.
+- `get_combined_status`, restoring what v0.12 dropped. An early `ci_status`
+  tool on this endpoint was removed because it answered `state: ""` with
+  `total_count: 0` for Actions repositories; that is no longer so on either
+  forge — Codeberg answers `pending`/2 for this repository's own CI and
+  gitea.com `success`/4 for `gitea/tea`. It is the tool for "did CI pass?",
+  where `get_commit_statuses` returns the transition history instead.
 - `list_repo_contents` was considered and not added: `get_file_contents`
   already lists a directory, and an empty path lists the root.
 

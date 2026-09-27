@@ -574,6 +574,39 @@ release notes get written before a build finishes and are therefore routinely wr
 that had since been signed and notarized — and the only alternative this server offered was
 deleting the release and recreating it, which takes its assets with it.
 
+### v0.20.4 — reading commits, keys, protection and CI
+
+Six read tools, each answering a question the server could previously only gesture at. Every one
+was probed against both forges before it was written; the divergences are recorded where they
+matter rather than discovered by a caller.
+
+- **`list_commits` / `get_commit`** — the server could name a branch's head and say nothing else
+  about it. Slimmed hard: the wire objects carry base64 `signature` and `payload` blobs of a few
+  hundred bytes to a couple of kilobytes *each*, plus `files` and `stats` on every listing entry.
+  A thirty-commit page is tens of kilobytes nobody reads. `signature` is `verified`, `unverified`
+  or `unsigned`, decided by whether a signature is present rather than by parsing `reason`, so an
+  unrecognised `gpg.error.*` still classifies and "nobody signed this" stays distinct from "this
+  did not verify".
+- **`list_keys`** — SSH and GPG for an account, because "can this instance verify my commits"
+  needs both. **Forgejo reports `verified` on an SSH key and Gitea does not** (Gitea's
+  `PublicKey` carries `last_used_at` instead), so the field is optional and absent means
+  unreported, never false. Defaulting it would assert a verified key was unverified on every
+  Gitea instance.
+- **`list_branch_protections`** — what a repository enforces per branch name or glob. The
+  allowlists naming who may bypass each gate are dropped; the question is what is enforced.
+  `enable_force_push` is Gitea-only and `apply_to_admins` Forgejo-only, both optional.
+- **`get_commit_statuses`** — every status against a ref. Note this is a *transition history*:
+  one job appears as queued, then running, then finished, so `gitea/tea`'s `main` carries twelve
+  entries for two jobs.
+- **`get_combined_status`** — the rolled-up verdict, restoring what v0.12 dropped. See the CI
+  status note below for why the original objection expired.
+- **`get_repo_tree`** — the whole tree in one request with `recursive`. `truncated` is reported
+  even when false: the forge stops early on a large tree, and concluding a file is absent from a
+  listing that stopped looking is unsound.
+
+`list_repo_contents` was considered and rejected: `get_file_contents` already lists a directory,
+and an empty path lists the root — confirmed against a live instance rather than assumed.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -596,7 +629,7 @@ a real client) so slow responses can return.
 
 ## Non-goals
 
-- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~30 endpoints this
+- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~47 endpoints this
   server touches, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
@@ -616,6 +649,13 @@ An early `ci_status` ("did my CI pass?") tool built on the combined commit-statu
 `total_count: 0` for Forgejo-Actions repos, because Actions don't populate commit statuses.
 (Aside: that empty `state: ""` is exactly the sort of value a strict typed client rejects; our
 loose parsing wouldn't choke on it, but there was still no useful status to return.)
+
+**Update, 27 September 2026 — the reason has expired.** Actions *do* populate commit statuses
+now, on both forges. Probed live: Codeberg answers the combined endpoint with `state: "pending"`
+and `total_count: 2` for this repository's own CI, and gitea.com answers `state: "success"` with
+`total_count: 4` for `gitea/tea`. So the objection that killed `ci_status` no longer holds, and
+v0.20.4 restores the capability as `get_combined_status` — plus `get_commit_statuses` for the
+per-check detail. What the earlier tool got wrong was not the endpoint but the era.
 
 The earlier belief that the Actions-runs endpoints themselves 404 on Codeberg was **wrong** —
 they 404 only when a repo has the Actions unit *disabled*, not because Forgejo lacks them.
@@ -676,5 +716,8 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     reach every repository unit (`has_releases` being the one the release tools need), and
     `edit_release` for correcting published notes without destroying a release's assets.
     *(done)*
-12. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
+12. **v0.20.4** — reading commits, keys, branch protection and CI status: `list_commits`,
+    `get_commit`, `list_keys`, `list_branch_protections`, `get_commit_statuses`,
+    `get_combined_status`, `get_repo_tree`. *(done)*
+13. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
     Non-goals), and slimming what still passes through raw.
