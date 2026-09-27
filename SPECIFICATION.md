@@ -627,6 +627,27 @@ clients keep the stdio connection open for the whole session, so this affects on
 `printf … | forgejo-mcp-rs` testing. When testing that way, keep stdin open (or test through
 a real client) so slow responses can return.
 
+## Releasing
+
+crates.io is the distribution channel; the git remotes are Codeberg (canonical) and a GitHub
+mirror, pushed together. A version is immutable once published — yanking hides it, nothing
+deletes it, and a number can never be reused — so the order matters.
+
+1. `cargo test` and `cargo clippy --all-targets` clean. The pre-push hook runs these plus
+   `cargo deny`, so a push that lands has already passed them.
+2. Bump `version` in **`Cargo.toml`**.
+3. Bump `version` in **`server.json`** — *both* fields, the top-level one and the one under
+   `packages[]`. Nothing enforces this: no script, no CI, no test reads the file, and it drifted
+   from 0.20.0 to 0.20.4 unnoticed across four releases because of it. It ships inside the crate
+   and feeds the MCP registry, so a stale value is published and advertised.
+4. Move the CHANGELOG's `[Unreleased]` heading to the version and today's date.
+5. Add a tool-surface section and a milestone entry to this file for anything new.
+6. Commit, push, and let CI go green before publishing — a release whose last green run predates
+   it by a dozen commits is a release nobody checked.
+7. `cargo publish --dry-run`, which packages the crate and compiles *from the package* — the step
+   that catches a crate depending on a file it does not ship.
+8. `cargo publish`.
+
 ## Non-goals
 
 - Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~47 endpoints this

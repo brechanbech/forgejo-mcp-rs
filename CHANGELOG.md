@@ -71,6 +71,13 @@ records what changed, that one records why.
 - `list_repo_contents` was considered and not added: `get_file_contents`
   already lists a directory, and an empty path lists the root.
 
+### Fixed
+- `server.json` advertised 0.20.0 in both its version fields, having never been
+  updated for 0.20.1 through 0.20.3. It ships inside the crate and feeds the
+  MCP registry, so four releases went out describing themselves as an older
+  one. Nothing referenced the file — no script, no CI, no test — which is how
+  it drifted; SPECIFICATION.md now carries a release checklist that names it.
+
 ### Forge divergence
 - `ContentsResponse` differs, which affects directory listings rather than the
   tools added here: Forgejo carries `last_commit_when`, Gitea carries
