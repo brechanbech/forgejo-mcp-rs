@@ -272,6 +272,17 @@ impl ForgejoMcp {
         tools::get_repo(&self.forgejo, params).await
     }
 
+    /// Lists a repository's branch protection rules.
+    #[tool(
+        description = "List a repository's branch protection rules (owner/repo). Shows what each rule enforces — require_signed_commits, whether direct pushes are allowed, required approvals, status checks — for a branch name or glob. A branch matching no rule is unprotected, so an empty list means nothing is protected rather than a missing feature. require_signed_commits rejects pushes that are unsigned OR unverifiable, and is checked against the commits a push introduces rather than the branch's history, so enabling it does not invalidate what is already there. Allowlists of usernames, teams and deploy keys are omitted: they answer who may bypass a gate, not what is enforced. enable_force_push is Gitea-only and apply_to_admins Forgejo-only — absent means the forge does not report it, not false."
+    )]
+    async fn list_branch_protections(
+        &self,
+        Parameters(params): Parameters<tools::RepoRef>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::list_branch_protections(&self.forgejo, params).await
+    }
+
     /// Lists an account's SSH and GPG keys.
     #[tool(
         description = "List an account's SSH and GPG keys (omit username for the authenticated user). A key must be present AND verified before the instance will verify signatures made with it. IMPORTANT: `verified` absent does not mean unverified — Gitea does not expose the field on SSH keys at all (its web UI shows 'Verified Key' but its API omits it), while Forgejo does. Absent means unreported; only an explicit false means the forge holds the key without having confirmed ownership. Since Gitea also answers gpg.error.no_gpg_keys_found whether a key is absent or merely unverified, on Gitea neither this nor a commit's reason settles it — the web UI is the only source. GPG entries carry the addresses the key covers and whether each is activated; a signature only verifies for a commit authored under an activated address. Key material and armored blobs are dropped — fingerprints and key ids identify them."

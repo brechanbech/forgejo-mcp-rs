@@ -315,6 +315,94 @@ fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
         .collect()
 }
 
+/// One branch protection rule, trimmed to the gates rather than the
+/// allowlists.
+///
+/// The wire object carries a dozen arrays of usernames, teams and deploy keys
+/// naming who may bypass each gate. Those answer "who", and the question worth
+/// a tool is "what is enforced" — so the `enable_*` flags survive and the
+/// membership lists do not.
+#[derive(Debug, Serialize)]
+struct BranchProtectionSummary {
+    /// The branch name or glob the rule matches. A branch matching no rule is
+    /// unprotected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_name: Option<String>,
+    /// Rejects pushes that are unsigned **or unverifiable**. Checked against
+    /// the commits a push introduces, not the branch's history, so turning it
+    /// on does not invalidate what is already there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    require_signed_commits: Option<bool>,
+    /// Whether direct pushes are allowed at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_push: Option<bool>,
+    /// True when only the allowlisted may push — the names are omitted here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_push_whitelist: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_approvals: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_status_check: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_on_outdated_branch: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_on_rejected_reviews: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protected_file_patterns: Option<String>,
+    /// Gitea only — Forgejo does not report it. Absent means unreported, not
+    /// false. Relevant to signing: the signed-commit check leans on force
+    /// push being refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_force_push: Option<bool>,
+    /// Forgejo only — Gitea does not report it. Absent means unreported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apply_to_admins: Option<bool>,
+}
+
+fn slim_branch_protections(items: &[Value]) -> Vec<BranchProtectionSummary> {
+    items
+        .iter()
+        .map(|r| BranchProtectionSummary {
+            rule_name: r
+                .get("rule_name")
+                .or_else(|| r.get("branch_name"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            require_signed_commits: r.get("require_signed_commits").and_then(Value::as_bool),
+            enable_push: r.get("enable_push").and_then(Value::as_bool),
+            enable_push_whitelist: r.get("enable_push_whitelist").and_then(Value::as_bool),
+            required_approvals: r.get("required_approvals").and_then(Value::as_i64),
+            enable_status_check: r.get("enable_status_check").and_then(Value::as_bool),
+            block_on_outdated_branch: r.get("block_on_outdated_branch").and_then(Value::as_bool),
+            block_on_rejected_reviews: r.get("block_on_rejected_reviews").and_then(Value::as_bool),
+            protected_file_patterns: r
+                .get("protected_file_patterns")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .map(ToOwned::to_owned),
+            enable_force_push: r.get("enable_force_push").and_then(Value::as_bool),
+            apply_to_admins: r.get("apply_to_admins").and_then(Value::as_bool),
+        })
+        .collect()
+}
+
+/// Lists a repository's branch protection rules.
+pub async fn list_branch_protections(
+    forge: &Forge,
+    params: RepoRef,
+) -> Result<CallToolResult, McpError> {
+    let (rules, total) = forge
+        .list_branch_protections(&params.owner, &params.repo)
+        .await
+        .map_err(to_mcp)?;
+    paged_result(
+        None,
+        None,
+        total,
+        &slim_branch_protections(&into_items(rules)),
+    )
+}
+
 /// One SSH key, trimmed. The key material itself is dropped — the fingerprint
 /// identifies it and the blob is a hundred-odd characters nobody compares by
 /// eye.
@@ -3319,6 +3407,71 @@ mod tests {
             "stats": { "additions": 412, "deletions": 90, "total": 502 },
             "parents": [{ "sha": "e8e1b9f6b8" }]
         })
+    }
+
+    #[test]
+    fn slim_branch_protections_keeps_the_gates_and_drops_the_allowlists() {
+        let raw = vec![serde_json::json!({
+            "rule_name": "main",
+            "branch_name": "main",
+            "require_signed_commits": true,
+            "enable_push": false,
+            "enable_push_whitelist": true,
+            "required_approvals": 1,
+            "enable_status_check": true,
+            "block_on_outdated_branch": false,
+            "block_on_rejected_reviews": true,
+            "protected_file_patterns": "",
+            // Who may bypass each gate — omitted, the question is what is enforced.
+            "push_whitelist_usernames": ["brechanbech", "someone"],
+            "push_whitelist_teams": ["owners"],
+            "approvals_whitelist_username": ["reviewer"],
+            "merge_whitelist_teams": ["maintainers"],
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-20T00:00:00Z"
+        })];
+        let v = serde_json::to_value(&slim_branch_protections(&raw)[0]).unwrap();
+        assert_eq!(v["rule_name"], "main");
+        assert_eq!(v["require_signed_commits"], true);
+        assert_eq!(v["enable_push"], false);
+        assert_eq!(v["required_approvals"], 1);
+        // Every allowlist, and the timestamps, are gone.
+        assert!(v.get("push_whitelist_usernames").is_none());
+        assert!(v.get("push_whitelist_teams").is_none());
+        assert!(v.get("approvals_whitelist_username").is_none());
+        assert!(v.get("created_at").is_none());
+        // An empty pattern string says nothing and is dropped rather than
+        // reported as a rule protecting "".
+        assert!(v.get("protected_file_patterns").is_none());
+    }
+
+    #[test]
+    fn branch_protection_flags_one_forge_lacks_stay_absent() {
+        // Forgejo reports apply_to_admins and not enable_force_push; Gitea the
+        // reverse. Absent must not read as false on either.
+        let forgejo = vec![serde_json::json!({
+            "rule_name": "main", "require_signed_commits": true, "apply_to_admins": true
+        })];
+        let v = serde_json::to_value(&slim_branch_protections(&forgejo)[0]).unwrap();
+        assert_eq!(v["apply_to_admins"], true);
+        assert!(v.get("enable_force_push").is_none());
+
+        let gitea = vec![serde_json::json!({
+            "rule_name": "main", "require_signed_commits": true, "enable_force_push": false
+        })];
+        let v = serde_json::to_value(&slim_branch_protections(&gitea)[0]).unwrap();
+        assert_eq!(v["enable_force_push"], false);
+        assert!(v.get("apply_to_admins").is_none());
+    }
+
+    #[test]
+    fn a_rule_named_only_by_the_legacy_field_still_reports_its_name() {
+        // Older payloads carry branch_name and no rule_name.
+        let raw = vec![
+            serde_json::json!({ "branch_name": "release/*", "require_signed_commits": false }),
+        ];
+        let v = serde_json::to_value(&slim_branch_protections(&raw)[0]).unwrap();
+        assert_eq!(v["rule_name"], "release/*");
     }
 
     #[test]

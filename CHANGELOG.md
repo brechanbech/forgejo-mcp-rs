@@ -37,6 +37,18 @@ records what changed, that one records why.
   compares by eye, and a GPG `public_key` is an armored block with `subkeys`
   nesting another copy of everything. Fingerprints and key ids identify them.
 
+- `list_branch_protections`. What a repository enforces per branch name or
+  glob, so "is signing required on main across all my repositories" is a
+  script rather than forty trips through a web UI. An empty list means nothing
+  is protected: a branch matching no rule is unprotected.
+- Allowlists do not survive. The wire object carries a dozen arrays of
+  usernames, teams and deploy keys naming who may bypass each gate; those
+  answer who, and the question worth a tool is what is enforced.
+- `enable_force_push` is Gitea-only and `apply_to_admins` Forgejo-only, both
+  optional, absent meaning unreported. The first matters for signing: the
+  signed-commit check leans on force push being refused, since it compares
+  only the range a push introduces.
+
 ### Forge divergence
 - **Gitea does not expose SSH key verification at all.** Forgejo's `PublicKey`
   carries `verified`; Gitea's carries `last_used_at` and no `verified`, so the

@@ -223,6 +223,20 @@ impl Forge {
         self.rest.get(&format!("repos/{owner}/{repo}"), &[]).await
     }
 
+    /// `GET /repos/{owner}/{repo}/branch_protections` — protection rules.
+    ///
+    /// A branch matching no rule is unprotected, so an empty list is the
+    /// answer "nothing is protected here" rather than a missing feature.
+    pub async fn list_branch_protections(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.rest
+            .get_list(&format!("repos/{owner}/{repo}/branch_protections"), &[])
+            .await
+    }
+
     /// `GET /user/keys` or `GET /users/{username}/keys` — SSH keys.
     ///
     /// Without a username this is the authenticated user's own list, which is
