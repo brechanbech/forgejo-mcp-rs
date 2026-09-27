@@ -315,6 +315,189 @@ fn slim_branches(items: Vec<Value>) -> Vec<BranchSummary> {
         .collect()
 }
 
+/// One status reported against a commit: a CI run, a linter, whatever posted
+/// it. `creator` and the timestamps are dropped — what matters is which check
+/// this was and how it went.
+#[derive(Debug, Serialize)]
+struct CommitStatusSummary {
+    /// The check's name, e.g. a workflow job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
+    /// `success`, `pending`, `failure`, `error` or `warning`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// Where the run can be read, when the reporter supplied one. Forgejo
+    /// exposes no logs API, so this link is often the only way to the detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+fn slim_commit_statuses(items: &[Value]) -> Vec<CommitStatusSummary> {
+    items
+        .iter()
+        .map(|s| CommitStatusSummary {
+            context: s
+                .get("context")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(ToOwned::to_owned),
+            status: s
+                .get("status")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            description: s
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+                .map(ToOwned::to_owned),
+            target_url: s
+                .get("target_url")
+                .and_then(Value::as_str)
+                .filter(|u| !u.is_empty())
+                .map(ToOwned::to_owned),
+            updated_at: s
+                .get("updated_at")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        })
+        .collect()
+}
+
+/// One entry in a git tree. `url` is dropped — it is derivable and repeats the
+/// sha on every line of what may be thousands.
+#[derive(Debug, Serialize)]
+struct TreeEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// `blob` for a file, `tree` for a directory, `commit` for a submodule.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TreeListing {
+    entries: Vec<TreeEntry>,
+    total_count: Option<i64>,
+    /// The forge stopped early. Anything concluded from a truncated tree —
+    /// "there is no such file" above all — is unsound.
+    truncated: bool,
+}
+
+fn slim_tree(raw: &Value) -> TreeListing {
+    let entries = raw
+        .get("tree")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|e| TreeEntry {
+                    path: e.get("path").and_then(Value::as_str).map(ToOwned::to_owned),
+                    kind: e.get("type").and_then(Value::as_str).map(ToOwned::to_owned),
+                    size: e.get("size").and_then(Value::as_i64),
+                    sha: e.get("sha").and_then(Value::as_str).map(ToOwned::to_owned),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    TreeListing {
+        entries,
+        total_count: raw.get("total_count").and_then(Value::as_i64),
+        truncated: raw
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CommitStatusesParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// The commit, branch or tag whose statuses to read.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RepoTreeParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Tree to read: a branch, tag or commit. Defaults to the repository's
+    /// default branch.
+    #[serde(default)]
+    pub sha: Option<String>,
+    /// Walk the whole tree rather than one level. Off by default, since a
+    /// large repository returns thousands of entries.
+    #[serde(default)]
+    pub recursive: Option<bool>,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Lists every status reported against a commit.
+pub async fn get_commit_statuses(
+    forge: &Forge,
+    params: CommitStatusesParams,
+) -> Result<CallToolResult, McpError> {
+    let (statuses, total) = forge
+        .list_commit_statuses(
+            &params.owner,
+            &params.repo,
+            &params.git_ref,
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    paged_result(
+        params.page,
+        params.limit,
+        total,
+        &slim_commit_statuses(&into_items(statuses)),
+    )
+}
+
+/// Reads a repository's git tree.
+pub async fn get_repo_tree(
+    forge: &Forge,
+    params: RepoTreeParams,
+) -> Result<CallToolResult, McpError> {
+    let sha = params.sha.as_deref().unwrap_or("HEAD");
+    let raw = forge
+        .get_repo_tree(
+            &params.owner,
+            &params.repo,
+            sha,
+            params.recursive.unwrap_or(false),
+            params.page,
+            params.limit,
+        )
+        .await
+        .map_err(to_mcp)?;
+    json_result(&slim_tree(&raw))
+}
+
 /// One branch protection rule, trimmed to the gates rather than the
 /// allowlists.
 ///
@@ -3407,6 +3590,77 @@ mod tests {
             "stats": { "additions": 412, "deletions": 90, "total": 502 },
             "parents": [{ "sha": "e8e1b9f6b8" }]
         })
+    }
+
+    #[test]
+    fn slim_commit_statuses_keeps_the_check_and_its_verdict() {
+        let raw = vec![serde_json::json!({
+            "id": 1,
+            "context": "build / test (pull_request)",
+            "status": "failure",
+            "description": "1 of 77 tests failed",
+            "target_url": "https://codeberg.org/brechanbech/xojo-mcp/actions/runs/12",
+            "updated_at": "2026-09-27T10:00:00Z",
+            "created_at": "2026-09-27T09:58:00Z",
+            "creator": { "login": "forgejo-actions", "email": "bot@example.com" },
+            "url": "https://codeberg.org/api/v1/repos/…/statuses/1"
+        })];
+        let v = serde_json::to_value(&slim_commit_statuses(&raw)[0]).unwrap();
+        assert_eq!(v["context"], "build / test (pull_request)");
+        assert_eq!(v["status"], "failure");
+        // The only route to a failing run's detail, there being no logs API.
+        assert!(v["target_url"].as_str().unwrap().contains("/actions/runs/"));
+        // The reporter's identity and the api url are not the question.
+        assert!(v.get("creator").is_none());
+        assert!(v.get("url").is_none());
+        assert!(v.get("created_at").is_none());
+    }
+
+    #[test]
+    fn an_empty_status_field_is_dropped_rather_than_reported_blank() {
+        let raw = vec![serde_json::json!({
+            "context": "", "status": "pending", "description": "", "target_url": ""
+        })];
+        let v = serde_json::to_value(&slim_commit_statuses(&raw)[0]).unwrap();
+        assert_eq!(v["status"], "pending");
+        assert!(v.get("context").is_none());
+        assert!(v.get("description").is_none());
+        assert!(v.get("target_url").is_none());
+    }
+
+    #[test]
+    fn slim_tree_carries_the_truncated_flag() {
+        // Truncation is the difference between "no such file" and "I stopped
+        // looking", so it survives even when false.
+        let raw = serde_json::json!({
+            "sha": "abc",
+            "url": "https://…",
+            "tree": [
+                { "path": "src/main.rs", "type": "blob", "size": 4096, "sha": "d1", "mode": "100644", "url": "https://…" },
+                { "path": "src", "type": "tree", "sha": "d2", "mode": "040000", "url": "https://…" }
+            ],
+            "total_count": 2,
+            "truncated": true,
+            "page": 1
+        });
+        let v = serde_json::to_value(slim_tree(&raw)).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["total_count"], 2);
+        assert_eq!(v["entries"][0]["path"], "src/main.rs");
+        assert_eq!(v["entries"][0]["type"], "blob");
+        assert_eq!(v["entries"][0]["size"], 4096);
+        // A url per entry repeats the sha across what may be thousands of lines.
+        assert!(v["entries"][0].get("url").is_none());
+        assert!(v["entries"][0].get("mode").is_none());
+        // A directory has no size and says nothing rather than zero.
+        assert!(v["entries"][1].get("size").is_none());
+    }
+
+    #[test]
+    fn a_tree_with_no_entries_is_empty_not_missing() {
+        let v = serde_json::to_value(slim_tree(&serde_json::json!({ "sha": "abc" }))).unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 0);
+        assert_eq!(v["truncated"], false);
     }
 
     #[test]

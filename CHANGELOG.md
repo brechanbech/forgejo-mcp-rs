@@ -49,7 +49,24 @@ records what changed, that one records why.
   signed-commit check leans on force push being refused, since it compares
   only the range a push introduces.
 
+- `get_commit_statuses`. The individual checks reported against a ref, where
+  `get_combined_status` gives only the rolled-up verdict. `target_url` is kept
+  because no forge exposes a logs API, so the link is often the only route to
+  a failing run.
+- `get_repo_tree`, with `recursive` to walk the whole tree in one request —
+  "where is every file of this kind" without descending directory by
+  directory. `truncated` is reported even when false: the forge stops early on
+  a large tree, and concluding a file is absent from a truncated listing is
+  unsound.
+- `list_repo_contents` was considered and not added: `get_file_contents`
+  already lists a directory, and an empty path lists the root.
+
 ### Forge divergence
+- `ContentsResponse` differs, which affects directory listings rather than the
+  tools added here: Forgejo carries `last_commit_when`, Gitea carries
+  `last_author_date`, `last_committer_date`, `last_commit_message`, `mode` and
+  LFS fields instead. `CommitStatus`, `CombinedStatus` and `GitTreeResponse`
+  are identical on both.
 - **Gitea does not expose SSH key verification at all.** Forgejo's `PublicKey`
   carries `verified`; Gitea's carries `last_used_at` and no `verified`, so the
   state its web UI displays as "Verified Key" is absent from its API. Both

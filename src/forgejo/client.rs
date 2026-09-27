@@ -223,6 +223,50 @@ impl Forge {
         self.rest.get(&format!("repos/{owner}/{repo}"), &[]).await
     }
 
+    /// `GET /repos/{owner}/{repo}/commits/{ref}/statuses` — every status
+    /// reported against a commit.
+    ///
+    /// Distinct from the *combined* status: this is the individual checks with
+    /// their contexts, where the combined endpoint is one rolled-up verdict.
+    pub async fn list_commit_statuses(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.rest
+            .get_list(
+                &format!("repos/{owner}/{repo}/commits/{git_ref}/statuses"),
+                &paging(page, limit),
+            )
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/git/trees/{sha}` — a tree, optionally whole.
+    ///
+    /// `recursive` walks the entire tree in one request, which is what makes
+    /// "where is every file of this kind" a single call rather than a descent.
+    /// Large trees are truncated by the forge, which says so in the response.
+    pub async fn get_repo_tree(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        recursive: bool,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<Value, ForgeError> {
+        let mut params = paging(page, limit);
+        if recursive {
+            params.push(("recursive", "true".to_owned()));
+        }
+        self.rest
+            .get(&format!("repos/{owner}/{repo}/git/trees/{sha}"), &params)
+            .await
+    }
+
     /// `GET /repos/{owner}/{repo}/branch_protections` — protection rules.
     ///
     /// A branch matching no rule is unprotected, so an empty list is the

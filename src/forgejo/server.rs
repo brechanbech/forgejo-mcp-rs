@@ -272,6 +272,28 @@ impl ForgejoMcp {
         tools::get_repo(&self.forgejo, params).await
     }
 
+    /// Lists every status reported against a commit.
+    #[tool(
+        description = "List the statuses reported against a commit, branch or tag (owner/repo/ref): each check's context, status (success, pending, failure, error, warning), description and target_url. These are the individual checks; get_combined_status rolls them into one verdict. Forgejo exposes no logs API, so target_url is often the only route to a failing run's detail. Creator and timestamps beyond updated_at are dropped."
+    )]
+    async fn get_commit_statuses(
+        &self,
+        Parameters(params): Parameters<tools::CommitStatusesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_commit_statuses(&self.forgejo, params).await
+    }
+
+    /// Reads a repository's git tree.
+    #[tool(
+        description = "Read a repository's git tree (owner/repo, optional sha — a branch, tag or commit, defaulting to HEAD). With recursive=true the whole tree arrives in one request, which answers \"where is every file of this kind\" without descending directory by directory; without it, one level. Entries are path, type (blob/tree/commit), size and sha. Check `truncated`: the forge stops early on a large tree, and concluding \"there is no such file\" from a truncated listing is unsound. For one directory's entries with no recursion, get_file_contents on a directory path is cheaper."
+    )]
+    async fn get_repo_tree(
+        &self,
+        Parameters(params): Parameters<tools::RepoTreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::get_repo_tree(&self.forgejo, params).await
+    }
+
     /// Lists a repository's branch protection rules.
     #[tool(
         description = "List a repository's branch protection rules (owner/repo). Shows what each rule enforces — require_signed_commits, whether direct pushes are allowed, required approvals, status checks — for a branch name or glob. A branch matching no rule is unprotected, so an empty list means nothing is protected rather than a missing feature. require_signed_commits rejects pushes that are unsigned OR unverifiable, and is checked against the commits a push introduces rather than the branch's history, so enabling it does not invalidate what is already there. Allowlists of usernames, teams and deploy keys are omitted: they answer who may bypass a gate, not what is enforced. enable_force_push is Gitea-only and apply_to_admins Forgejo-only — absent means the forge does not report it, not false."
