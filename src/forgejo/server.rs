@@ -274,7 +274,7 @@ impl ForgejoMcp {
 
     /// Lists an account's SSH and GPG keys.
     #[tool(
-        description = "List an account's SSH and GPG keys (omit username for the authenticated user). Answers whether this instance can verify a signature: a key must be present AND `verified` — verified false means the forge holds the key but has not confirmed ownership, and commits signed with it still read as unverified. Gitea reports gpg.error.no_gpg_keys_found for both cases, so check here rather than inferring from a commit's reason. GPG entries carry the addresses the key covers and whether each is activated; a signature only verifies for a commit authored under an activated address. Key material and armored blobs are dropped — fingerprints and key ids identify them."
+        description = "List an account's SSH and GPG keys (omit username for the authenticated user). A key must be present AND verified before the instance will verify signatures made with it. IMPORTANT: `verified` absent does not mean unverified — Gitea does not expose the field on SSH keys at all (its web UI shows 'Verified Key' but its API omits it), while Forgejo does. Absent means unreported; only an explicit false means the forge holds the key without having confirmed ownership. Since Gitea also answers gpg.error.no_gpg_keys_found whether a key is absent or merely unverified, on Gitea neither this nor a commit's reason settles it — the web UI is the only source. GPG entries carry the addresses the key covers and whether each is activated; a signature only verifies for a commit authored under an activated address. Key material and armored blobs are dropped — fingerprints and key ids identify them."
     )]
     async fn list_keys(
         &self,

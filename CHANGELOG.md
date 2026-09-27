@@ -37,6 +37,19 @@ records what changed, that one records why.
   compares by eye, and a GPG `public_key` is an armored block with `subkeys`
   nesting another copy of everything. Fingerprints and key ids identify them.
 
+### Forge divergence
+- **Gitea does not expose SSH key verification at all.** Forgejo's `PublicKey`
+  carries `verified`; Gitea's carries `last_used_at` and no `verified`, so the
+  state its web UI displays as "Verified Key" is absent from its API. Both
+  instances were probed; the OpenAPI definitions disagree and only one of them
+  was checked at first, which produced a wrong claim about what the tool could
+  answer.
+- Hence `verified` is optional and absent is reported as absent. Defaulting it
+  to false would assert that a verified key is unverified on every Gitea
+  instance. On Gitea neither this tool nor a commit's `reason` settles the
+  question — `gpg.error.no_gpg_keys_found` covers both an absent key and an
+  unverified one — and the web UI remains the only source.
+
 ### Notes
 - Forgejo (codeberg.org) and Gitea (gitea.com) were probed directly: both
   endpoints return the same shape, field for field, including the

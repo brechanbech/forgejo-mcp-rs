@@ -328,10 +328,16 @@ struct SshKeySummary {
     fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     key_type: Option<String>,
-    /// Whether the key has been verified with a signed token. **A key that is
-    /// merely present does not verify commits** — the forge shows "Verified
+    /// Whether the key has been verified with a signed token. A key that is
+    /// merely present does not verify commits — the forge shows "Verified
     /// Key" only once this is true, and until then commits signed with it read
     /// as unverified.
+    ///
+    /// Optional because **Gitea does not expose it**: its `PublicKey` carries
+    /// `last_used_at` where Forgejo's carries `verified`, so the state exists
+    /// in Gitea's web UI and nowhere in its API. Absent must therefore read as
+    /// "not reported", never as false — defaulting it would assert a verified
+    /// key was unverified on every Gitea instance.
     #[serde(skip_serializing_if = "Option::is_none")]
     verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3372,8 +3378,9 @@ mod tests {
 
     #[test]
     fn a_key_list_with_no_verified_flag_says_nothing_rather_than_false() {
-        // Another user's public list may omit it; absent must not read as
-        // "not verified".
+        // The shape gitea.com returns: its PublicKey has no `verified` field
+        // at all, so absent must not read as "not verified" — the key this
+        // fixture is modelled on is verified on that instance.
         let raw = vec![serde_json::json!({
             "id": 1,
             "title": "someone else",
