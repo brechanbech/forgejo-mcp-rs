@@ -662,6 +662,22 @@ deletes it, and a number can never be reused — so the order matters.
    at v0.4.4 on the registry while its own `server.json` said 0.5.2. A published crate whose
    registry entry names an older version tells every client to install the older one.
 
+**No SLSA provenance step, deliberately.** Codeberg offers the OpenSSF *SLSA Generic generator*,
+and it cannot work here: it is a GitHub Actions reusable workflow fetched from `github.com`,
+which Forgejo will not resolve; it declares `permissions: id-token: write`, where Forgejo v15
+enables OIDC with `enable-openid-connect` instead; and even if it ran, keyless signing binds the
+identity to GitHub's OIDC issuer, so a Forgejo-issued token would not verify as a GitHub Actions
+workflow identity — SLSA Build L3 also expects a hardened builder the ecosystem recognises, which
+Codeberg's runners are not. The realistic route to provenance is running releases from the GitHub
+mirror, which is not worth moving a Codeberg-canonical project for.
+
+**crates.io Trusted Publishing** is the thing to watch instead: it replaces the API token with
+OIDC, and supports GitHub Actions and GitLab.com today — not self-hosted GitLab, and not
+Forgejo. crates.io has refactored for multiple providers, so Codeberg support is plausible later.
+There is also a per-crate setting to *enforce* Trusted Publishing, which disables token
+publishing entirely; do not enable it while releases run from Codeberg, as it would lock this
+crate out of its own release path.
+
 ## Non-goals
 
 - Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~47 endpoints this
