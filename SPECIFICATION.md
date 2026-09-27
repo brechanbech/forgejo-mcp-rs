@@ -647,6 +647,20 @@ deletes it, and a number can never be reused — so the order matters.
 7. `cargo publish --dry-run`, which packages the crate and compiles *from the package* — the step
    that catches a crate depending on a file it does not ship.
 8. `cargo publish`.
+9. Publish to the [MCP registry](https://registry.modelcontextprotocol.io), **after** crates.io
+   and not before: the registry verifies the namespace by fetching
+   `mcp-name: io.github.brechanbech/forgejo-mcp-rs` from this crate's *rendered README on
+   crates.io*, and `server.json` names a cargo version that has to exist there already.
+
+   ```sh
+   mcp-publisher validate          # checks server.json against the live registry
+   mcp-publisher login github      # interactive; the io.github.brechanbech/* namespace
+   mcp-publisher publish
+   ```
+
+   This is as easy to forget as the manifest itself was, and drifts the same way — `sec-mcp` sat
+   at v0.4.4 on the registry while its own `server.json` said 0.5.2. A published crate whose
+   registry entry names an older version tells every client to install the older one.
 
 ## Non-goals
 
