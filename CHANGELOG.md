@@ -8,6 +8,18 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.20.6] — 2026-10-23
+
+### Fixed
+- `list_workflow_runs` refuses an abbreviated `head_sha`. Both forges match
+  the filter exactly, so `126a915` returned an empty list, which looks the same
+  as "this commit has no runs". It now has to be the full 40-character SHA, or
+  64 for a SHA-256 repository. Uppercase is lowercased rather than refused.
+- A queued run no longer reports that it started and stopped in 1970. Forgejo
+  sends "never" as the Unix epoch in the server's zone, not as an empty
+  string. Run and job timestamps now treat the epoch and Go's zero time
+  (`0001-01-01`) as absent.
+
 ## [0.20.5] — 2026-10-23
 
 ### Added

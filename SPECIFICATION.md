@@ -479,7 +479,10 @@ distinction. The fields are allow-listed rather than filtered out, which is also
 embedded `repository` object, the whole `event_payload`, and the `trigger_user` email out of the
 response. An empty string counts as absent, because both forges send `""` rather than null for a
 conclusion or timestamp that doesn't exist yet — otherwise a queued run would report a blank
-conclusion and lose its status.
+conclusion and lose its status. *(Corrected in v0.20.6: not always `""`. Forgejo reports a
+queued run's `started` and `stopped` as the Unix epoch, rendered in the server's zone —
+`1970-01-01T01:00:00+01:00` on Codeberg. Timestamps now treat the epoch, on either side of
+midnight UTC, and Go's zero time `0001-01-01` as absent too.)*
 
 This renamed the summary's fields (`index_in_repo` → `run_number`, `prettyref` → `ref`,
 `workflow_id` → `workflow`), which is the breaking part of the release and the reason it is a

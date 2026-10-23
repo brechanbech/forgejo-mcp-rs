@@ -2937,7 +2937,9 @@ pub struct ListWorkflowRunsParams {
     pub owner: String,
     /// Repository name.
     pub repo: String,
-    /// Filter by head commit SHA — the most reliable way to find the run for a given push.
+    /// Filter by head commit SHA — the most reliable way to find the run for a given push. Must
+    /// be the full 40-character SHA (64 for SHA-256): the match is exact, so an abbreviated one
+    /// would find nothing, and is refused instead.
     #[serde(default)]
     pub head_sha: Option<String>,
     /// Filter by branch or tag ref, e.g. `refs/heads/main`.
@@ -3020,6 +3022,46 @@ fn first_str(run: &Value, keys: &[&str]) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Reads the first of `keys` that holds a real timestamp.
+///
+/// "Never" is not always `""`. Forgejo writes a zero Unix timestamp for a run that has not
+/// started — `1970-01-01T01:00:00+01:00` on Codeberg, rendered in the server's zone — and Go's
+/// zero `time.Time` is `0001-01-01T00:00:00Z`. Either reported as a date would claim a queued
+/// run started in 1970. The epoch can fall on 31 December 1969 west of UTC, so both days count;
+/// no CI run is from either.
+fn first_time(v: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| v.get(*k).and_then(Value::as_str))
+        .find(|s| {
+            !s.is_empty()
+                && !s.starts_with("1970-01-01")
+                && !s.starts_with("1969-12-31")
+                && !s.starts_with("0001-01-01")
+        })
+        .map(ToOwned::to_owned)
+}
+
+/// Checks a `head_sha` filter is a whole commit id, lowercased.
+///
+/// Both forges match the filter exactly, so an abbreviated or uppercase SHA does not fail — it
+/// returns an empty list, indistinguishable from "this commit has no runs". Confirmed live on
+/// Codeberg and gitea.com. Refusing it is the only way to make that mistake visible.
+fn full_sha(sha: &str) -> Result<String, McpError> {
+    let is_full = matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_full {
+        Ok(sha.to_ascii_lowercase())
+    } else {
+        Err(McpError::invalid_params(
+            format!(
+                "head_sha must be a full commit SHA (40 hex characters, or 64 for a SHA-256 \
+                 repository), not {sha:?}: the forge matches it exactly, so an abbreviated SHA \
+                 finds nothing. Expand it with `git rev-parse` or get_commit."
+            ),
+            None,
+        ))
+    }
+}
+
 /// Reads the first of `keys` that holds an integer.
 fn first_i64(run: &Value, keys: &[&str]) -> Option<i64> {
     keys.iter().find_map(|k| run.get(*k)?.as_i64())
@@ -3057,9 +3099,9 @@ fn normalize_run(run: &Value) -> RunSummary {
         // requests — so the ref embedded in `path` is the reliable fallback.
         git_ref: first_str(run, &["prettyref", "head_branch"]).or(path_ref),
         html_url: first_str(run, &["html_url"]),
-        created: first_str(run, &["created", "created_at"]),
-        started: first_str(run, &["started", "started_at"]),
-        stopped: first_str(run, &["stopped", "completed_at"]),
+        created: first_time(run, &["created", "created_at"]),
+        started: first_time(run, &["started", "started_at"]),
+        stopped: first_time(run, &["stopped", "completed_at"]),
     }
 }
 
@@ -3120,7 +3162,7 @@ pub async fn list_workflow_runs(
     params: ListWorkflowRunsParams,
 ) -> Result<CallToolResult, McpError> {
     let filters = RunFilters {
-        head_sha: params.head_sha,
+        head_sha: params.head_sha.as_deref().map(full_sha).transpose()?,
         git_ref: params.git_ref,
         status: params.status,
         event: params.event,
@@ -3247,8 +3289,8 @@ fn normalize_job(job: &Value) -> JobSummary {
         conclusion: first_str(job, &["conclusion"]),
         attempt: first_i64(job, &["attempt", "run_attempt"]),
         runs_on: first_str_list(job, &["runs_on", "labels"]),
-        started: first_str(job, &["started", "started_at"]),
-        stopped: first_str(job, &["stopped", "completed_at"]),
+        started: first_time(job, &["started", "started_at"]),
+        stopped: first_time(job, &["stopped", "completed_at"]),
         html_url: first_str(job, &["html_url"]),
         steps,
     }
@@ -4974,5 +5016,52 @@ index cc10f213c2..d3bf724104 100644
             clean_log(raw, true),
             "2026-09-27T12:30:14.3978135Z ok\n2026-09-27T12:30:15.0Z done\n"
         );
+    }
+
+    #[test]
+    fn a_queued_forgejo_run_reports_no_epoch_timestamps() {
+        // From Codeberg (this repository's run 38, seconds after the push): "never started"
+        // arrives as the Unix epoch in the server's zone, not as an empty string.
+        let run = serde_json::json!({
+            "id": 7_959_932, "index_in_repo": 38, "status": "waiting", "workflow_id": "ci.yml",
+            "created": "2026-10-23T14:43:54+02:00",
+            "started": "1970-01-01T01:00:00+01:00",
+            "stopped": "1970-01-01T01:00:00+01:00"
+        });
+        let s = normalize_run(&run);
+        assert_eq!(s.created.as_deref(), Some("2026-10-23T14:43:54+02:00"));
+        assert_eq!((s.started, s.stopped), (None, None));
+    }
+
+    #[test]
+    fn zero_times_in_any_zone_count_as_unset() {
+        for never in [
+            "1970-01-01T00:00:00Z",
+            "1969-12-31T19:00:00-05:00",
+            "0001-01-01T00:00:00Z",
+            "",
+        ] {
+            let v = serde_json::json!({ "started_at": never });
+            assert_eq!(first_time(&v, &["started_at"]), None, "{never:?}");
+        }
+        let v = serde_json::json!({ "started_at": "2026-10-23T00:11:04Z" });
+        assert_eq!(
+            first_time(&v, &["started_at"]).as_deref(),
+            Some("2026-10-23T00:11:04Z")
+        );
+    }
+
+    #[test]
+    fn head_sha_must_be_a_whole_commit_id() {
+        let sha1 = "126a915c1551d436f96071a9ba94e8a36d2f2101";
+        assert_eq!(full_sha(sha1).unwrap(), sha1);
+        // Uppercase would also silently miss, so it is normalized rather than refused.
+        assert_eq!(full_sha(&sha1.to_ascii_uppercase()).unwrap(), sha1);
+        assert!(full_sha(&"a".repeat(64)).is_ok(), "SHA-256 repositories");
+        // The abbreviation that returned an empty list on Codeberg.
+        let err = full_sha("126a915").unwrap_err();
+        assert!(err.message.contains("full commit SHA"), "{}", err.message);
+        assert!(full_sha("main").is_err());
+        assert!(full_sha(&"g".repeat(40)).is_err(), "hex only");
     }
 }
