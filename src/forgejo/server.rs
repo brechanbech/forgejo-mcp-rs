@@ -223,7 +223,7 @@ impl ForgejoMcp {
 
     /// Lists issues in a repository.
     #[tool(
-        description = "List issues in a repository (owner/repo); optional state (open/closed/all) and page/limit"
+        description = "List issues in a repository (owner/repo), open by default; optional state (open/closed/all) and page/limit. Issues only — pull requests, which the forges also serve as issues, are left out; use list_pull_requests for those. Each issue is slimmed to number, title, state, author, labels, assignees, milestone, comment count and dates, without its body; get_issue has the body."
     )]
     async fn list_issues(
         &self,
@@ -233,7 +233,9 @@ impl ForgejoMcp {
     }
 
     /// Gets one issue by number.
-    #[tool(description = "Get one issue by number from a repository (owner/repo/index)")]
+    #[tool(
+        description = "Get one issue by number from a repository (owner/repo/index): list_issues' fields plus body, locked, due_date and ref. Issues and pull requests share one numbering, so a pull request's number works here too and is marked `pull_request: true` — get_pull_request has its branches and merge state."
+    )]
     async fn get_issue(
         &self,
         Parameters(params): Parameters<tools::RepoItemRef>,
@@ -633,7 +635,7 @@ impl ForgejoMcp {
 
     /// Creates an issue in a repository.
     #[tool(
-        description = "Create an issue in a repository (owner/repo/title, optional body; requires write mode)"
+        description = "Create an issue in a repository (owner/repo/title, optional body; requires write mode). Answers with the new issue in get_issue's shape; its `number` addresses it from then on."
     )]
     async fn create_issue(
         &self,

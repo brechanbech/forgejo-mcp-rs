@@ -1150,6 +1150,103 @@ pub async fn get_file_contents(
     json_result(&Value::Object(out))
 }
 
+/// An issue reduced to what a list of them is read for.
+///
+/// The raw object carries the author's full profile (24 fields, email included), the repository
+/// it belongs to, every label's colour and description, and the whole body. Fifteen open issues
+/// of `forgejo/forgejo` came to 53 KB, 22 KB of it bodies. The body is what `get_issue` is for;
+/// a listing is read for which issues there are and where they stand.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct IssueSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    /// `open` or `closed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// Who wrote it on the forge it was migrated from, when it was migrated — `author` is then
+    /// the account that ran the migration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_author: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    assignees: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    milestone: Option<String>,
+    /// Comment count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comments: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<String>,
+}
+
+/// One issue as `get_issue` and `create_issue` report it: the summary, plus what only matters
+/// when looking at a single one.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct IssueDetail {
+    #[serde(flatten)]
+    summary: IssueSummary,
+    /// The description, as Markdown. Absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    due_date: Option<String>,
+    /// The branch or tag the issue is tied to, when one is set.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    git_ref: Option<String>,
+    /// Present, and `true`, when the number is a pull request's: the forges number both in one
+    /// sequence and answer `…/issues/{n}` for either. `get_pull_request` has its branches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pull_request: Option<bool>,
+}
+
+/// Projects one raw issue — Forgejo's or Gitea's, which agree on this shape — onto
+/// [`IssueSummary`].
+fn slim_issue(issue: &Value) -> IssueSummary {
+    IssueSummary {
+        number: issue.get("number").and_then(Value::as_i64),
+        title: text_at(issue, "/title"),
+        state: text_at(issue, "/state"),
+        author: text_at(issue, "/user/login"),
+        original_author: text_at(issue, "/original_author"),
+        labels: names_at(issue, "/labels", "name"),
+        assignees: names_at(issue, "/assignees", "login"),
+        milestone: text_at(issue, "/milestone/title"),
+        comments: issue.get("comments").and_then(Value::as_i64),
+        created_at: first_time(issue, &["created_at"]),
+        updated_at: first_time(issue, &["updated_at"]),
+        closed_at: first_time(issue, &["closed_at"]),
+        html_url: text_at(issue, "/html_url"),
+    }
+}
+
+/// Projects one raw issue onto [`IssueDetail`].
+fn issue_detail(issue: &Value) -> IssueDetail {
+    IssueDetail {
+        summary: slim_issue(issue),
+        body: text_at(issue, "/body"),
+        locked: issue.get("is_locked").and_then(Value::as_bool),
+        due_date: first_time(issue, &["due_date"]),
+        git_ref: text_at(issue, "/ref"),
+        pull_request: issue
+            .get("pull_request")
+            .is_some_and(|p| !p.is_null())
+            .then_some(true),
+    }
+}
+
 /// Lists issues in `owner/repo` (open issues by default).
 pub async fn list_issues(
     forge: &Forge,
@@ -1162,7 +1259,8 @@ pub async fn list_issues(
         })
         .await
         .map_err(to_mcp)?;
-        return gathered_result(&all.items, all.total, all.truncated);
+        let items: Vec<IssueSummary> = all.items.iter().map(slim_issue).collect();
+        return gathered_result(&items, all.total, all.truncated);
     }
     let (issues, total) = forge
         .list_issues(
@@ -1174,7 +1272,8 @@ pub async fn list_issues(
         )
         .await
         .map_err(to_mcp)?;
-    paged_result(params.page, params.limit, total, &into_items(issues))
+    let items: Vec<IssueSummary> = into_items(issues).iter().map(slim_issue).collect();
+    paged_result(params.page, params.limit, total, &items)
 }
 
 /// Gets one issue by index.
@@ -1183,7 +1282,7 @@ pub async fn get_issue(forge: &Forge, params: RepoItemRef) -> Result<CallToolRes
         .get_issue(&params.owner, &params.repo, params.index)
         .await
         .map_err(to_mcp)?;
-    json_result(&issue)
+    json_result(&issue_detail(&issue))
 }
 
 /// Parameters for the `list_pull_requests` tool.
@@ -2415,7 +2514,7 @@ pub async fn create_issue(
         .create_issue(&params.owner, &params.repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
-    json_result(&issue)
+    json_result(&issue_detail(&issue))
 }
 
 /// Parameters for the `create_branch` tool.
@@ -5812,5 +5911,82 @@ index cc10f213c2..d3bf724104 100644
         assert_eq!(state_or_open(None).unwrap(), "open");
         assert_eq!(state_or_open(Some("ALL")).unwrap(), "all");
         assert!(state_or_open(Some("merged")).is_err());
+    }
+
+    /// Codeberg `forgejo/forgejo` #14991 on 24 October 2026, trimmed: an open issue with labels,
+    /// no assignee or milestone, and the empty strings and nulls both forges send for "none".
+    fn codeberg_issue() -> Value {
+        serde_json::json!({
+            "number": 14991,
+            "title": "problem: I have no way of distinguishing review requests made by CODEOWNERS",
+            "state": "open",
+            "user": { "login": "rdfm", "email": "rdfm@noreply.codeberg.org" },
+            "original_author": "",
+            "labels": [
+                { "name": "impact/unknown", "color": "545454" },
+                { "name": "problem", "color": "fbca04" }
+            ],
+            "assignees": null, "milestone": null, "comments": 1,
+            "body": "When a review is requested…",
+            "created_at": "2026-10-23T19:22:07+02:00", "closed_at": null, "due_date": null,
+            "ref": "", "is_locked": false, "pull_request": null,
+            "repository": { "id": 73144, "full_name": "forgejo/forgejo" }
+        })
+    }
+
+    #[test]
+    fn an_issue_in_a_listing_keeps_its_standing_and_drops_the_body() {
+        let s = slim_issue(&codeberg_issue());
+        assert_eq!(s.number, Some(14991));
+        assert_eq!(s.author.as_deref(), Some("rdfm"));
+        assert_eq!(
+            s.original_author, None,
+            "an empty original_author is no author"
+        );
+        assert_eq!(
+            s.labels,
+            vec!["impact/unknown".to_owned(), "problem".to_owned()]
+        );
+        assert_eq!(s.comments, Some(1));
+
+        let json = serde_json::to_string(&s).unwrap();
+        for leaked in [
+            "noreply.codeberg.org",
+            "fbca04",
+            "When a review",
+            "repository",
+        ] {
+            assert!(!json.contains(leaked), "{leaked} leaked");
+        }
+    }
+
+    #[test]
+    fn one_issue_adds_its_body_and_says_nothing_it_does_not_have() {
+        let json = serde_json::to_value(issue_detail(&codeberg_issue())).unwrap();
+        assert_eq!(json["body"], "When a review is requested…");
+        assert_eq!(json["number"], 14991);
+        assert_eq!(json["locked"], false);
+        // `ref: ""`, `due_date: null` and `pull_request: null` are all "none", and left out.
+        for absent in ["ref", "due_date", "pull_request", "assignees", "milestone"] {
+            assert!(json.get(absent).is_none(), "{absent} should be absent");
+        }
+    }
+
+    #[test]
+    fn a_pull_request_fetched_as_an_issue_says_so() {
+        // Codeberg answers `…/issues/14984` for a pull request, with a `pull_request` object.
+        let mut raw = codeberg_issue();
+        raw["pull_request"] = serde_json::json!({
+            "merged": false, "draft": false,
+            "html_url": "https://codeberg.org/forgejo/forgejo/pulls/14984"
+        });
+        assert_eq!(issue_detail(&raw).pull_request, Some(true));
+    }
+
+    #[test]
+    fn a_migrated_issue_names_its_original_author() {
+        let mut raw = codeberg_issue();
+        raw["original_author"] = serde_json::json!("octocat");
+        assert_eq!(slim_issue(&raw).original_author.as_deref(), Some("octocat"));
     }
 }

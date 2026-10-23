@@ -399,7 +399,11 @@ impl Forge {
             .await
     }
 
-    /// `GET /repos/{owner}/{repo}/issues` — issues, optionally filtered by `state`.
+    /// `GET /repos/{owner}/{repo}/issues?type=issues` — issues, optionally filtered by `state`.
+    ///
+    /// Always asks for `type=issues`: without it both forges list pull requests here too, since
+    /// a pull request is an issue to them. Codeberg's `forgejo/forgejo` had 1,728 open "issues"
+    /// on 24 October 2026, 154 of them pull requests; `list_pull_requests` is the tool for those.
     pub async fn list_issues(
         &self,
         owner: &str,
@@ -412,6 +416,7 @@ impl Forge {
         if let Some(state) = state {
             query.push(("state", state.to_owned()));
         }
+        query.push(("type", "issues".to_owned()));
         self.rest
             .get_list(&format!("repos/{owner}/{repo}/issues"), &query)
             .await

@@ -8,6 +8,23 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.22.0] — 2026-10-24
+
+### Changed
+- Issues are slimmed like pull requests. The raw object carried the author's
+  full profile, email included, the repository and every label's colour, and
+  15 open `forgejo/forgejo` issues came to 53 KB. `list_issues` gives number,
+  title, state, author, label names, assignees, milestone, comment count and
+  dates, without the body. `get_issue` and `create_issue` add the body,
+  `locked`, `due_date` and `ref`, and `pull_request: true` when the number
+  belongs to a pull request.
+
+### Fixed
+- `list_issues` listed pull requests as well. Both forges serve them as issues
+  unless asked for `type=issues`. On `forgejo/forgejo`, 154 of the 1,728 open
+  "issues" were pull requests, and half of the first 50 returned. The tool now
+  always sends `type=issues`.
+
 ## [0.21.0] — 2026-10-24
 
 ### Added

@@ -216,7 +216,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `whoami` | read | The authenticated user (verifies the token) |
 | `version` | read | This MCP server's version, the connected instance's version, and its `flavor` (`forgejo` or `gitea`) |
 | `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
-| `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default) |
+| `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default), without the pull requests the forges also list as issues. Slimmed: state, author, labels, assignees, milestone, comment count and dates; `get_issue` adds the body |
 | `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default); filter by `base` and `head` branch (`head` may be `owner:branch`) to ask whether a branch already has an open pull request. Slimmed: branches, state, `head_sha`, author, labels and dates; `get_pull_request` adds the description, reviewers and merge details |
 | `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
 | `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |

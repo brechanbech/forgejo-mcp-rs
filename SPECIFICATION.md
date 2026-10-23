@@ -141,8 +141,8 @@ token-broker process, which is out of scope.
 | `get_repo` | **done** | One repository's details (incl. default branch and size in KiB), slimmed. |
 | `list_branches` | **done** | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected). |
 | `get_file_contents` | **done** | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). |
-| `list_issues` | **done** | Issues in `owner/repo` (open by default). |
-| `get_issue` | **done** | One issue by number. |
+| `list_issues` | **done** | Issues in `owner/repo` (open by default); issues only, and slimmed, since v0.22.0. |
+| `get_issue` | **done** | One issue by number. Slimmed since v0.22.0, like the listing, plus the body. |
 | `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default); `base`/`head` branch filters since v0.21.0. |
 | `get_pull_request` | **done** | One pull request by number. Slimmed since v0.21.0, like the listing, plus description, reviewers and merge details. |
 | `search_repos` | **done** | Search repositories by keyword. |
@@ -835,6 +835,33 @@ has no runners), and firing someone else's CI is not an option. Both tools are t
 unproven on Gitea, as `dispatch_workflow` is, until a self-hosted Gitea with a runner exists.
 
 
+### v0.22.0 — issues slimmed, and only issues
+
+`list_issues`, `get_issue` and `create_issue` passed the raw issue object through. It carries
+the author's full profile (24 fields, email included), the repository the issue belongs to,
+every label's colour and description, and the whole body. Fifteen open `forgejo/forgejo` issues
+came to 53 KB, 22 KB of it bodies. Now they follow the pull requests in
+[v0.21.0](#v0210--cancel-and-rerun-and-listings-that-answer-what-was-asked):
+
+- **`list_issues`** gives number, title, state, author, `original_author` (only for a migrated
+  issue, whose `author` is then the migrating account), label names, assignee logins, milestone
+  title, comment count and dates. There is no body: a listing is read for which issues there are,
+  and the body is what `get_issue` is for.
+- **`get_issue` and `create_issue`** add the body, `locked`, `due_date` and `ref`. They also add
+  `pull_request: true` when the number belongs to a pull request. Both forges number issues and
+  pull requests in one sequence and answer `…/issues/{n}` for either.
+
+The same probe showed the listing was not only issues. Without `type=issues`, both forges list
+pull requests here too, as issues with a `pull_request` object. On 24 October 2026:
+
+| open, from `…/issues` | no `type` | `type=issues` | `type=pulls` |
+|---|---|---|---|
+| Codeberg `forgejo/forgejo` | 1,728 | 1,574 | 154 |
+| gitea.com `gitea/tea` | 101 | 87 | 14 |
+
+Half of the first 50 Codeberg returned were pull requests. `list_issues` now always sends
+`type=issues`; `list_pull_requests` is the tool for the rest.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -1003,5 +1030,7 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     compatibility marker alone, a run listing that is always paged, releases that name
     their assets rather than carrying them, and pull requests filtered by branch and slimmed.
     *(done; cancel verified live on Codeberg, rerun awaits Forgejo 17)*
-15. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
+15. **v0.22.0** — issues slimmed like pull requests, and `list_issues` limited to issues.
+    *(done)*
+16. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
     through raw.
