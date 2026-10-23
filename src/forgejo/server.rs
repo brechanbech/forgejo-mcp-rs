@@ -243,17 +243,19 @@ impl ForgejoMcp {
 
     /// Lists pull requests in a repository.
     #[tool(
-        description = "List pull requests in a repository (owner/repo); optional state (open/closed/all) and page/limit"
+        description = "List pull requests in a repository (owner/repo); optional state (open/closed/all), base and head branch, and page/limit. `head` is a bare branch name, or owner:branch to require the fork it comes from; with state=open it answers whether a branch already has an open pull request. Every answer is checked against base and head, because a forge that lacks a filter ignores it: Gitea has no head filter, and Forgejo had neither before 16. On those the whole list is walked and filtered here (capped at 1000), so page/limit no longer apply. Each pull request is slimmed to number, title, state, merged, draft, mergeable, base, head, head_repo (only for a fork), head_sha, author, labels and dates; get_pull_request has the description and review detail."
     )]
     async fn list_pull_requests(
         &self,
-        Parameters(params): Parameters<tools::ListItemsParams>,
+        Parameters(params): Parameters<tools::ListPullRequestsParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::list_pull_requests(&self.forgejo, params).await
     }
 
     /// Gets one pull request by number.
-    #[tool(description = "Get one pull request by number from a repository (owner/repo/index)")]
+    #[tool(
+        description = "Get one pull request by number from a repository (owner/repo/index): list_pull_requests' fields plus body, merged_by, merge_commit_sha, merge_base, assignees, requested_reviewers, milestone, comment counts and diff_url. head_sha is what list_workflow_runs takes to find its CI. For the changes themselves use list_pull_request_files or get_pull_request_diff."
+    )]
     async fn get_pull_request(
         &self,
         Parameters(params): Parameters<tools::RepoItemRef>,
@@ -551,7 +553,7 @@ impl ForgejoMcp {
 
     /// Lists a repository's releases.
     #[tool(
-        description = "List a repository's releases (owner/repo), newest first, each with its downloadable assets; optional page/limit"
+        description = "List a repository's releases (owner/repo), newest first, each with its asset_count and asset_names; optional page/limit. For an asset's id, size or download URL use list_release_assets with the release `id`."
     )]
     async fn list_releases(
         &self,
@@ -562,7 +564,7 @@ impl ForgejoMcp {
 
     /// Gets one release by its git tag.
     #[tool(
-        description = "Get one release by its git tag (owner/repo/tag). Use this before create_release to make a release script idempotent: the tag is known up front, the release id only after creation."
+        description = "Get one release by its git tag (owner/repo/tag). Returns the release's identity, notes (`body`), `target_commitish`, and its asset_count and asset_names; list_release_assets has each asset's id, size and URL. Use this before create_release to make a release script idempotent: the tag is known up front, the release id only after creation."
     )]
     async fn get_release(
         &self,
@@ -661,7 +663,7 @@ impl ForgejoMcp {
 
     /// Opens a pull request from one branch into another.
     #[tool(
-        description = "Open a pull request in a repository (owner/repo/title/head/base, optional body; requires write mode)"
+        description = "Open a pull request in a repository (owner/repo/title/head/base, optional body; requires write mode). Answers with the new pull request in get_pull_request's shape; its `number` addresses it from then on."
     )]
     async fn create_pull_request(
         &self,
@@ -915,7 +917,8 @@ impl ServerHandler for ForgejoMcp {
              deleting and recreating the release, which would drop its assets; it sends \
              only the fields you pass, so omitting one leaves it unchanged. Forgejo keeps same-named \
              assets side by side rather than replacing them, so delete the old asset before \
-             uploading its replacement. upload_release_asset reads a LOCAL file and publishes \
+             uploading its replacement. Releases report only their asset names; list_release_assets gives the \
+             attachment id that delete_release_asset takes. upload_release_asset reads a LOCAL file and publishes \
              it: it works only inside the server's FORGEJO_UPLOAD_ROOT and refuses everything \
              when that is unset, so a refusal means the server needs configuring, not that the \
              path should be worked around. \

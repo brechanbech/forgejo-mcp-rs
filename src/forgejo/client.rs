@@ -429,19 +429,17 @@ impl Forge {
             .await
     }
 
-    /// `GET /repos/{owner}/{repo}/pulls` — pull requests, optionally filtered by `state`.
+    /// `GET /repos/{owner}/{repo}/pulls` — pull requests, optionally filtered by state and by base
+    /// and head branch. The query depends on the flavor; see [`pull_list_query`].
     pub async fn list_pull_requests(
         &self,
         owner: &str,
         repo: &str,
-        state: Option<&str>,
+        filters: &PullFilters<'_>,
         page: Option<u32>,
         limit: Option<u32>,
     ) -> Result<(Value, Option<usize>), ForgeError> {
-        let mut query = paging(page, limit);
-        if let Some(state) = state {
-            query.push(("state", state.to_owned()));
-        }
+        let query = pull_list_query(self.flavor().await, filters, page, limit);
         self.rest
             .get_list(&format!("repos/{owner}/{repo}/pulls"), &query)
             .await
@@ -971,6 +969,54 @@ fn rerun_path(flavor: Flavor, owner: &str, repo: &str, run_id: i64, job_id: Opti
     }
 }
 
+/// The pull-request filters a caller can ask for, before they are translated to the query
+/// parameters this instance's flavor understands.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PullFilters<'a> {
+    /// `open`, `closed` or `all`.
+    pub state: Option<&'a str>,
+    /// Base (target) branch name.
+    pub base: Option<&'a str>,
+    /// Head (source) branch name, bare. Forgejo matches it against the head's `label`, which is
+    /// the branch name for an ordinary pull request and `user/topic` for an agit-flow one.
+    pub head: Option<&'a str>,
+}
+
+/// Builds the query for a pull-request listing, per flavor.
+///
+/// | filter | Forgejo 16+ | Gitea |
+/// |---|---|---|
+/// | base branch | `base` | `base_branch` |
+/// | head branch | `head` | none |
+///
+/// Probed on Codeberg and gitea.com on 24 October 2026, and each forge silently ignores the
+/// other's spelling: Codeberg returned all 10,350 of `forgejo/forgejo`'s pull requests for
+/// `base_branch`, and gitea.com all 748 of `gitea/tea`'s for `base` or `head`. So only the
+/// flavor's own spelling is sent, and a head filter is not sent to Gitea at all — the tool layer
+/// applies it there, and checks the answer on every forge, since Forgejo before 16 has neither.
+fn pull_list_query(
+    flavor: Flavor,
+    filters: &PullFilters<'_>,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Vec<(&'static str, String)> {
+    let mut query = paging(page, limit);
+    if let Some(state) = filters.state {
+        query.push(("state", state.to_owned()));
+    }
+    if let Some(base) = filters.base {
+        let key = match flavor {
+            Flavor::Forgejo => "base",
+            Flavor::Gitea => "base_branch",
+        };
+        query.push((key, base.to_owned()));
+    }
+    if let (Flavor::Forgejo, Some(head)) = (flavor, filters.head) {
+        query.push(("head", head.to_owned()));
+    }
+    query
+}
+
 /// Builds the path and query for a workflow-run listing, per flavor.
 ///
 /// The differences, all confirmed against the two published `OpenAPI` specs:
@@ -1182,6 +1228,34 @@ mod tests {
                 ("page", "1".to_owned()),
                 ("limit", "30".to_owned()),
                 ("status", "failure".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pull_filters_use_each_flavors_own_spelling() {
+        let filters = PullFilters {
+            state: Some("open"),
+            base: Some("main"),
+            head: Some("feature"),
+        };
+        assert_eq!(
+            pull_list_query(Flavor::Forgejo, &filters, None, None),
+            vec![
+                ("state", "open".to_owned()),
+                ("base", "main".to_owned()),
+                ("head", "feature".to_owned()),
+            ]
+        );
+        // Gitea has no head filter and spells base differently; `head` would be ignored, so it
+        // is not sent.
+        assert_eq!(
+            pull_list_query(Flavor::Gitea, &filters, Some(1), Some(50)),
+            vec![
+                ("page", "1".to_owned()),
+                ("limit", "50".to_owned()),
+                ("state", "open".to_owned()),
+                ("base_branch", "main".to_owned()),
             ]
         );
     }

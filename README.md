@@ -90,7 +90,7 @@ guesses wrong on your instance.
 > (Codeberg reports `16.0.0-dev-785-465b60ef+gitea-1.22.0`) to advertise API compatibility,
 > while Gitea never names itself (`29.0.0+dev-160-g55186ca39b`). So a `gitea-` marker means
 > Forgejo, and anything without it is Gitea. The major version is no guide: Gitea has left the
-> 1.x line, and before v0.20.7 that made gitea.com look like Forgejo.
+> 1.x line, and before v0.21.0 that made gitea.com look like Forgejo.
 
 Where the two forges differ, and what the server does about it:
 
@@ -105,6 +105,7 @@ Where the two forges differ, and what the server does about it:
 | `workflow_dispatch` reply | the created run (`return_run_info`) | `204 No Content` | Forgejo's run is passed through; on Gitea the tool returns an acknowledgement and tells the caller to find the run with `list_workflow_runs` |
 | Workflow directory | `.forgejo/workflows`, `.github/workflows` | `.gitea/workflows`, `.github/workflows` | Mentioned in the `dispatch_workflow` tool description |
 | Jobs of a run | bare array; no timestamps or steps | `{ jobs, total_count }`, with timestamps and steps | Unwrapped and normalized like runs; what Forgejo omits stays absent |
+| Pull-request filter by branch | `base`, `head` (Forgejo 16+) | `base_branch` only | Translated; `head` is applied here on Gitea, by walking the list. Every answer is checked against both, since a forge ignores a filter it lacks |
 | Cancel and rerun reply | `204 No Content` | the run (`200`/`201`); a job for a job rerun | The run from the reply where there is one, otherwise read back; reported in `list_workflow_runs`' shape |
 | Rerun one job | `…/actions/jobs/{job_id}/rerun` | `…/actions/runs/{run}/jobs/{job_id}/rerun` | Translated; `run_id` is required on both |
 | Cancel a finished run | `204`, left unchanged | unverified; its spec lists a `409 Conflict` | Errors surfaced as-is; on success the returned run's `status` says what happened |
@@ -216,7 +217,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `version` | read | This MCP server's version, the connected instance's version, and its `flavor` (`forgejo` or `gitea`) |
 | `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
 | `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default) |
-| `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default) |
+| `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default); filter by `base` and `head` branch (`head` may be `owner:branch`) to ask whether a branch already has an open pull request. Slimmed: branches, state, `head_sha`, author, labels and dates; `get_pull_request` adds the description, reviewers and merge details |
 | `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
 | `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
 | `list_commits` | read | Commits on a ref (`owner/repo`, optional `sha` and `path`; auto-paginated). Slimmed to sha, subject, author, date and signature state — the raw objects carry base64 `signature`/`payload` blobs and per-commit `files`/`stats` |
@@ -238,8 +239,8 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
 | `list_workflow_jobs` | read | The jobs of one run, normalized on both forges; each job's `id` is what `get_job_log` takes. Forgejo 16+ |
 | `get_job_log` | read | Part of one job's log, fetched by HTTP `Range` — the last 32 KiB by default (`max_bytes` up to 1 MiB), cut to whole lines, colour codes and timestamps stripped. `earlier` / `later` give the next window to ask for. Forgejo 16+ |
-| `list_releases` | read | A repo's releases, newest first (auto-paginated, slimmed to identity + assets) |
-| `get_release` | read | One release by git **tag** — the lookup that makes a release script idempotent |
+| `list_releases` | read | A repo's releases, newest first (auto-paginated), slimmed to identity plus `asset_count` and `asset_names` |
+| `get_release` | read | One release by git **tag** — the lookup that makes a release script idempotent. The same slim shape, plus the notes and `target_commitish` |
 | `list_release_assets` | read | A release's attached files (`id`, name, size, download URL) by `release_id` |
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
@@ -305,7 +306,8 @@ pass, so changing the `body` leaves the title and draft state untouched.
 
 Publishing a build is three calls: look the tag up with `get_release`, `create_release` if that
 404s, then `upload_release_asset` per file. Re-running is safe as long as you delete a
-same-named asset first — Forgejo keeps both otherwise, rather than replacing.
+same-named asset first — Forgejo keeps both otherwise, rather than replacing. The release shows only
+its asset names; `list_release_assets` gives the `attachment_id` to delete by.
 
 `upload_release_asset` is the only tool that reads the local disk, and whatever it reads becomes
 a publicly downloadable file. So it is confined rather than trusted:

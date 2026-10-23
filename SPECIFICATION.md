@@ -143,8 +143,8 @@ token-broker process, which is out of scope.
 | `get_file_contents` | **done** | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). |
 | `list_issues` | **done** | Issues in `owner/repo` (open by default). |
 | `get_issue` | **done** | One issue by number. |
-| `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default). |
-| `get_pull_request` | **done** | One pull request by number. |
+| `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default); `base`/`head` branch filters since v0.21.0. |
+| `get_pull_request` | **done** | One pull request by number. Slimmed since v0.21.0, like the listing, plus description, reviewers and merge details. |
 | `search_repos` | **done** | Search repositories by keyword. |
 | `list_orgs` | **done** | Organizations the user belongs to. |
 | `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
@@ -152,8 +152,8 @@ token-broker process, which is out of scope.
 | `list_workflow_runs` | **done** | Actions runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. |
 | `get_workflow_run` | **done** | One Actions run by id (a run's outcome is its `status`). |
 | `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run by workflow file name. |
-| `cancel_workflow_run` | **done** | Write-mode. Cancel a pending or running run (v0.20.7). |
-| `rerun_workflow` | **done** | Write-mode. Rerun a finished run, or one job of it (v0.20.7; Forgejo 17+). |
+| `cancel_workflow_run` | **done** | Write-mode. Cancel a pending or running run (v0.21.0). |
+| `rerun_workflow` | **done** | Write-mode. Rerun a finished run, or one job of it (v0.21.0; Forgejo 17+). |
 
 Each tool returns the relevant Forgejo API JSON, pretty-printed. Full-resource endpoints pass
 the raw response straight through; the slimmed tools (repositories, branches, notifications,
@@ -213,13 +213,13 @@ landed across v0.3–v0.11 and are listed in the README's current tool table rat
 | `list_workflow_runs` | **done** | Runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. A run's outcome is its `status` (no separate `conclusion`). |
 | `get_workflow_run` | **done** | One run by internal `id` (not `index_in_repo`, despite the web URL). |
 | `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run, keyed by workflow file name (no list-workflows API — discover via `get_file_contents`). |
-| `cancel_workflow_run` | **done** | Write-mode, v0.20.7. Cancel a pending or running run; answers with the run. |
-| `rerun_workflow` | **done** | Write-mode, v0.20.7. Rerun a finished run, or with `job_id` one job and its dependents. Forgejo 17+; a missing endpoint is reported as such. |
+| `cancel_workflow_run` | **done** | Write-mode, v0.21.0. Cancel a pending or running run; answers with the run. |
+| `rerun_workflow` | **done** | Write-mode, v0.21.0. Rerun a finished run, or with `job_id` one job and its dependents. Forgejo 17+; a missing endpoint is reported as such. |
 
 `list_workflow_runs` unwraps the endpoint's `{ workflow_runs, total_count }` body (no
 `X-Total-Count` header), so it does not auto-paginate. It always sends `page` and `limit`, defaulting to page 1 of 30, because Forgejo ignores
 `limit` here without `page` and returns every run; see
-[v0.20.7](#v0207--cancel-and-rerun-and-gitea-detection-fixed). A `404` from these endpoints means the
+[v0.21.0](#v0210--cancel-and-rerun-and-listings-that-answer-what-was-asked). A `404` from these endpoints means the
 repo has the Actions unit disabled, not that there are no runs. Verified end-to-end against a
 live dispatched run on Codeberg, then running Forgejo 15.
 
@@ -434,8 +434,8 @@ string** — Codeberg reports `16.0.0-dev-741-6f391573+gitea-1.22.0`, older rele
 `7.0.4+0-gitea-1.22.0` — to advertise API compatibility, while Gitea never names itself
 (`1.27.0+dev-954-g1f3981a301`). A `gitea-` marker therefore means Forgejo. Failing that marker,
 the major version decided: Gitea was still on 1.x, Forgejo renumbered to 7 and beyond, so 2+ was
-Forgejo. *(Corrected in v0.20.7: gitea.com now reports `29.0.0`, so the major version is no
-signal and only the marker counts — see [v0.20.7](#v0207--cancel-and-rerun-and-gitea-detection-fixed).)*
+Forgejo. *(Corrected in v0.21.0: gitea.com now reports `29.0.0`, so the major version is no
+signal and only the marker counts — see [v0.21.0](#v0210--cancel-and-rerun-and-listings-that-answer-what-was-asked).)*
 The live strings are pinned as constants in the client's unit tests.
 
 Detection is lazy rather than done at startup for two reasons: `from_env` is synchronous and does
@@ -532,8 +532,8 @@ proven.
 
 | Tool | Status | Purpose |
 |---|---|---|
-| `list_releases` | **done** | A repo's releases newest first, each slimmed to what identifies it plus its downloadable assets. |
-| `get_release` | **done** | One release **by git tag** — `GET /repos/{owner}/{repo}/releases/tags/{tag}`. |
+| `list_releases` | **done** | A repo's releases newest first, each slimmed to what identifies it plus its asset names (v0.21.0; before, each asset in full). |
+| `get_release` | **done** | One release **by git tag** — `GET /repos/{owner}/{repo}/releases/tags/{tag}`. Slimmed like `list_releases`, plus notes and `target_commitish` (v0.21.0; raw before). |
 | `list_release_assets` | **done** | The files attached to one release, by `release_id`; returns the `attachment_id` that deletion takes. |
 | `create_release` | **done** | Write-mode. `POST …/releases` with a `CreateReleaseOption`; the tag must already exist unless `target_commitish` creates it. |
 | `edit_release` | **done** | Write-mode. `PATCH …/releases/{id}` with a partial `EditReleaseOption`: `name`, `body`, `tag_name`, `target_commitish`, `draft`, `prerelease`. |
@@ -672,7 +672,7 @@ which ignores `?step=` and would ignore `?q=` too, returning an unfiltered log t
 believes it filtered. That is the same silent-filter trap the run filters were translated to
 avoid. Worth revisiting once those parameters are live where this server is used.
 
-### v0.20.7 — cancel and rerun, and Gitea detection fixed
+### v0.21.0 — cancel and rerun, and listings that answer what was asked
 
 Two write tools, both gated by write mode like `dispatch_workflow`:
 
@@ -728,7 +728,7 @@ ignored. With `page` alone it pages at 30. Probed on Codeberg on 24 October 2026
 | `page=1&limit=3` | 3 | 3 s for `limit=5` |
 | `page=2` | the oldest 11, after the newest 30 on page 1 | — |
 
-So until v0.20.7, `list_workflow_runs` could not list runs at all on a large Forgejo repository
+So until v0.21.0, `list_workflow_runs` could not list runs at all on a large Forgejo repository
 unless the caller passed `page`, and on a small one it returned everything regardless of
 `limit`. It now always sends both, defaulting to page 1 and a limit of 30, which is Forgejo's
 own page size. The reply echoes the values actually sent. `run_list_request` takes them as
@@ -743,6 +743,83 @@ this repository's run 40, dispatched for the cancel test below, has `"event": ""
 `"trigger_event": "workflow_dispatch"`, and a push run has both. `trigger_event` is also what
 Forgejo's `event` filter matches. The normalizer now reads `trigger_event` first and falls back
 to `event`, which is the only field Gitea has.
+
+**Releases report their asset names, not the assets.** `forgejo/forgejo` attaches 21 files to
+every release: a binary, `.xz`, `.asc` and `.sha256` for each platform, plus the source tarball.
+Measured on 15 of its releases on 24 October 2026:
+
+| what is returned | size |
+|---|---|
+| the raw API response, which `get_release` used to pass through | 122 KB, about 8 KB a release |
+| `list_releases` until now, each asset with id, name, size, download count and URL | 66 KB of assets |
+| asset names alone | 11 KB |
+
+`list_releases` now gives each release `asset_count` and `asset_names`. `get_release`,
+`create_release` and `edit_release` give the same summary plus the notes (`body`, omitted when
+empty) and `target_commitish`, so a single release has one shape whichever tool returned it.
+Upload URLs, tarball links and the uploader's full user object were already dropped from the
+listing and are now dropped here too. `list_release_assets` is where the per-asset detail lives,
+including the `attachment_id` that `delete_release_asset` takes. The re-upload sequence therefore
+gains a call when a same-named asset already exists: `get_release` shows the name is taken, and
+`list_release_assets` supplies the id.
+
+**`list_pull_requests` gains `base` and `head`,** so the tool can answer "does this branch
+already have an open pull request?" without listing every pull request. Probed on 24 October
+2026:
+
+| query | Codeberg, `forgejo/forgejo` | gitea.com, `gitea/tea` |
+|---|---|---|
+| `state=all`, no filter | 10,350 | 748 |
+| `base=…` | 147 for `v16.0/forgejo` | 748 (ignored) |
+| `base_branch=…` | 10,350 (ignored) | 509 for `main` |
+| `head=<branch>` | 1 | 748 (ignored) |
+| `head=<owner>:<branch>` | 0 | — |
+
+Each forge silently ignores the other's spelling, and Forgejo before 16 has neither, which is
+the run filters' trap again. So the tool sends only the flavor's own spelling (`base` and
+`head`, or `base_branch`) and then checks every pull request it got back against both filters.
+If the check drops anything, the forge ignored a filter, and the page it sent is not the page
+that was asked for. The tool then walks the whole list and filters it locally, as it always does
+for a head filter on Gitea, which has none. The walk is capped at 1,000 like every auto-paginated
+listing, and `truncated` says so; with the default `state=open` that is rarely reached.
+
+Forgejo's `head` matches the head's `label`, not its `ref`. For an ordinary pull request the two
+are the branch name, even from a fork. For an agit-flow one, `ref` is `refs/pull/{n}/head` and
+the label is `user/topic`: `head=mahlzahn/fix_package_view_templates` finds #14984, and the bare
+topic does not. The local check accepts either field, so it agrees with Forgejo's filter.
+gitea.com's agit-flow pull requests carry the branch name in `label` the same way. Codeberg
+rejects GitHub's `owner:branch` form with an empty answer, which would read as "no pull
+request". The tool therefore accepts it, sends only the branch, and checks the owner against
+`head.repo.owner.login` itself.
+
+**"Open by default" is now sent rather than assumed.** Checking the slimmed listing on gitea.com
+turned up merged pull requests in a call that gave no `state`. Both forges default `…/pulls` to
+every state, though `…/issues` to open. Probed on 24 October 2026:
+
+| | no `state` | `state=open` |
+|---|---|---|
+| Codeberg `forgejo/forgejo` pulls | 10,350 | 154 |
+| gitea.com `gitea/tea` pulls | 748 | 14 |
+| Codeberg `forgejo/forgejo` issues | 1,728 | 1,728 |
+| gitea.com `gitea/tea` issues | 101 | 101 |
+
+The tool had documented `open` as its default since v0.1 but sent nothing, so on either forge an
+unqualified `list_pull_requests` walked closed pull requests too and stopped at the 1,000 cap.
+`state_or_open` now sends `open` when the caller names no state, for issues as well, so the
+default is the tool's and does not depend on the forge.
+
+**Pull requests are slimmed.** The two answers that tried the new filters live were 12–15 KB
+for a single pull request. The raw object embeds the base and head repositories in full, which is
+the same object twice for an in-repository branch. It also embeds the author's and every
+requested reviewer's full profile, email addresses included, and every label's colour and
+description. `list_pull_requests` now gives each pull request number, title, state, `merged`,
+`draft`, `mergeable`, `base`, `head`, `head_repo` (only when the head is in a fork), `head_sha`,
+author, label names and its dates. `head` is the branch the `head` filter takes: the `ref`, or for
+an agit-flow pull request its `label`. `head_sha` is what `list_workflow_runs` takes to find the
+pull request's CI. `get_pull_request` and `create_pull_request` add the description, `merged_by`,
+`merge_commit_sha`, `merge_base`, assignees, requested reviewers, milestone, comment counts and
+`diff_url`. The diff itself stays with `list_pull_request_files` and `get_pull_request_diff`.
+Issues still pass through raw and are next in line.
 
 **Verified live on Codeberg on 24 October 2026**, through the installed binary over MCP and in
 write mode. CI was dispatched on this repository (run 40, id 7968548) and cancelled at once;
@@ -922,8 +999,9 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     `get_combined_status`, `get_repo_tree`. *(done)*
 13. **v0.20.5** — Actions job logs: `list_workflow_jobs` and `get_job_log`, bounded by HTTP
     `Range`. *(done)*
-14. **v0.20.7** — `cancel_workflow_run` and `rerun_workflow`, Gitea detection by the
-    compatibility marker alone, and a run listing that is always paged. *(done; cancel verified
-    live on Codeberg, rerun awaits Forgejo 17)*
+14. **v0.21.0** — `cancel_workflow_run` and `rerun_workflow`, Gitea detection by the
+    compatibility marker alone, a run listing that is always paged, releases that name
+    their assets rather than carrying them, and pull requests filtered by branch and slimmed.
+    *(done; cancel verified live on Codeberg, rerun awaits Forgejo 17)*
 15. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
     through raw.

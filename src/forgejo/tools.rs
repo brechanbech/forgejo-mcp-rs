@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::client::{Forge, ForgeError, RunFilters};
+use super::client::{Flavor, Forge, ForgeError, PullFilters, RunFilters};
 
 /// Returns the authenticated user — proof the token works.
 pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
@@ -171,6 +171,15 @@ fn parse_state(state: &str) -> Result<&'static str, McpError> {
             None,
         )),
     }
+}
+
+/// The state to send for a listing: the caller's, or `open`. Always sent, never left to the
+/// forge: both default `…/pulls` to every state, though `…/issues` to open. Probed on
+/// 24 October 2026, an unqualified listing returned all 10,350 of `forgejo/forgejo`'s pull
+/// requests on Codeberg rather than its 154 open ones, and all 748 of `gitea/tea`'s on gitea.com
+/// rather than 14.
+fn state_or_open(state: Option<&str>) -> Result<&'static str, McpError> {
+    state.map_or(Ok("open"), parse_state)
 }
 
 /// A slimmed repository — the fields worth returning from a list, dropping the ~80-field full
@@ -1146,7 +1155,7 @@ pub async fn list_issues(
     forge: &Forge,
     params: ListItemsParams,
 ) -> Result<CallToolResult, McpError> {
-    let state = params.state.as_deref().map(parse_state).transpose()?;
+    let state = Some(state_or_open(params.state.as_deref())?);
     if params.page.is_none() && params.limit.is_none() {
         let all = gather_all(|page, limit| {
             Box::pin(forge.list_issues(&params.owner, &params.repo, state, Some(page), Some(limit)))
@@ -1177,37 +1186,301 @@ pub async fn get_issue(forge: &Forge, params: RepoItemRef) -> Result<CallToolRes
     json_result(&issue)
 }
 
-/// Lists pull requests in `owner/repo` (open by default).
+/// Parameters for the `list_pull_requests` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct ListPullRequestsParams {
+    /// Repository owner — user or organization, e.g. `brechanbech`.
+    pub owner: String,
+    /// Repository name, e.g. `forgejo-mcp-rs`.
+    pub repo: String,
+    /// Filter by state: `open` (default), `closed`, or `all`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Only pull requests into this base (target) branch, e.g. `main`.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Only pull requests from this head (source) branch: a bare branch name, e.g.
+    /// `fix/login`, or `owner:branch` to require the fork it comes from.
+    #[serde(default)]
+    pub head: Option<String>,
+    /// 1-based page number.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Results per page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// A head-branch filter as the caller gave it: a branch, optionally qualified by the owner of
+/// the repository it comes from, GitHub-style. Git refuses `:` in a branch name, so the first
+/// one can only be that separator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeadFilter<'a> {
+    owner: Option<&'a str>,
+    branch: &'a str,
+}
+
+impl<'a> HeadFilter<'a> {
+    fn parse(head: &'a str) -> Result<Self, McpError> {
+        let (owner, branch) = match head.split_once(':') {
+            Some((owner, branch)) => (Some(owner), branch),
+            None => (None, head),
+        };
+        if branch.is_empty() || owner.is_some_and(str::is_empty) {
+            return Err(McpError::invalid_params(
+                format!("head must be a branch name or owner:branch, not {head:?}"),
+                None,
+            ));
+        }
+        Ok(Self { owner, branch })
+    }
+}
+
+/// Whether a raw pull request matches the base and head filters.
+///
+/// Run over every answer, not just where the forge cannot filter: a forge that does not know a
+/// filter ignores it rather than refusing it, so an unfiltered answer would otherwise pass for a
+/// filtered one. The head branch is compared with both `ref` and `label`. They agree for an
+/// ordinary pull request, but an agit-flow one reports `ref` as `refs/pull/{n}/head` and only `label`
+/// names the branch — `user/topic` on Forgejo, which is also what its own `head` filter matches.
+fn pull_matches(pr: &Value, base: Option<&str>, head: Option<&HeadFilter<'_>>) -> bool {
+    let field = |pointer: &str| pr.pointer(pointer).and_then(Value::as_str);
+    let base_ok = base.is_none_or(|b| field("/base/ref") == Some(b));
+    let head_ok = head.is_none_or(|h| {
+        let branch_ok =
+            field("/head/ref") == Some(h.branch) || field("/head/label") == Some(h.branch);
+        let owner_ok = h.owner.is_none_or(|o| {
+            field("/head/repo/owner/login").is_some_and(|login| login.eq_ignore_ascii_case(o))
+        });
+        branch_ok && owner_ok
+    });
+    base_ok && head_ok
+}
+
+/// A pull request reduced to what a list of them is read for.
+///
+/// The raw object is 12–15 KB on Codeberg and gitea.com: it embeds the base and head
+/// repositories in full (the same object twice for a branch in the same repository), the
+/// author's and every requested reviewer's full profile, email addresses included, and every
+/// label's colour and description. None of that answers "which pull requests, from where to
+/// where, in what state".
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PullSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    /// `open` or `closed`; a merged pull request is `closed` with `merged: true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft: Option<bool>,
+    /// Whether it can be merged as it stands. Only meaningful while it is open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mergeable: Option<bool>,
+    /// Target branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base: Option<String>,
+    /// Source branch: the head's `ref`, or for an agit-flow pull request, whose `ref` is
+    /// `refs/pull/{n}/head`, its `label` — what the `head` filter takes either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head: Option<String>,
+    /// The repository the head branch lives in, when it is not the base repository: a fork.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_repo: Option<String>,
+    /// Commit at the tip of the head branch — what `list_workflow_runs` takes as `head_sha`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<String>,
+}
+
+/// One pull request as `get_pull_request` and `create_pull_request` report it: the summary,
+/// plus what only matters when looking at a single one.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PullDetail {
+    #[serde(flatten)]
+    summary: PullSummary,
+    /// The description, as Markdown. Absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_base: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    assignees: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requested_reviewers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    milestone: Option<String>,
+    /// Comment count, not counting review comments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comments: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_comments: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff_url: Option<String>,
+}
+
+/// Reads a non-empty string at a JSON pointer.
+fn text_at(value: &Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// The `field` of each object in the array at `pointer` — label names, user logins.
+fn names_at(value: &Value, pointer: &str, field: &str) -> Vec<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get(field).and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Projects one raw pull request — Forgejo's or Gitea's, which agree on this shape — onto
+/// [`PullSummary`].
+fn slim_pull(pr: &Value) -> PullSummary {
+    let head_ref = text_at(pr, "/head/ref");
+    let head = match head_ref {
+        Some(r) if r.starts_with("refs/pull/") => text_at(pr, "/head/label").or(Some(r)),
+        other => other,
+    };
+    let base_repo = text_at(pr, "/base/repo/full_name");
+    let head_repo = text_at(pr, "/head/repo/full_name").filter(|h| Some(h) != base_repo.as_ref());
+    PullSummary {
+        number: pr.get("number").and_then(Value::as_i64),
+        title: text_at(pr, "/title"),
+        state: text_at(pr, "/state"),
+        merged: pr.get("merged").and_then(Value::as_bool),
+        draft: pr.get("draft").and_then(Value::as_bool),
+        mergeable: pr.get("mergeable").and_then(Value::as_bool),
+        base: text_at(pr, "/base/ref"),
+        head,
+        head_repo,
+        head_sha: text_at(pr, "/head/sha"),
+        author: text_at(pr, "/user/login"),
+        labels: names_at(pr, "/labels", "name"),
+        created_at: first_time(pr, &["created_at"]),
+        updated_at: first_time(pr, &["updated_at"]),
+        closed_at: first_time(pr, &["closed_at"]),
+        merged_at: first_time(pr, &["merged_at"]),
+        html_url: text_at(pr, "/html_url"),
+    }
+}
+
+/// Projects one raw pull request onto [`PullDetail`].
+fn pull_detail(pr: &Value) -> PullDetail {
+    PullDetail {
+        summary: slim_pull(pr),
+        body: text_at(pr, "/body"),
+        merged_by: text_at(pr, "/merged_by/login"),
+        merge_commit_sha: text_at(pr, "/merge_commit_sha"),
+        merge_base: text_at(pr, "/merge_base"),
+        assignees: names_at(pr, "/assignees", "login"),
+        requested_reviewers: names_at(pr, "/requested_reviewers", "login"),
+        milestone: text_at(pr, "/milestone/title"),
+        comments: pr.get("comments").and_then(Value::as_i64),
+        review_comments: pr.get("review_comments").and_then(Value::as_i64),
+        diff_url: text_at(pr, "/diff_url"),
+    }
+}
+
+/// Lists pull requests in `owner/repo` (open by default), optionally by base and head branch.
+///
+/// Where the forge filters, the answer is checked against the filters and passed on. Where it
+/// cannot — Gitea has no head filter, and Forgejo before 16 neither — the whole list is walked
+/// and filtered here instead, whatever `page`/`limit` asked for: a filtered page cut from an
+/// unfiltered list would be neither the page nor the filter the caller meant. The walk stops at
+/// the usual cap, and `truncated` says so.
 pub async fn list_pull_requests(
     forge: &Forge,
-    params: ListItemsParams,
+    params: ListPullRequestsParams,
 ) -> Result<CallToolResult, McpError> {
-    let state = params.state.as_deref().map(parse_state).transpose()?;
-    if params.page.is_none() && params.limit.is_none() {
-        let all = gather_all(|page, limit| {
-            Box::pin(forge.list_pull_requests(
+    let state = Some(state_or_open(params.state.as_deref())?);
+    let head = params.head.as_deref().map(HeadFilter::parse).transpose()?;
+    let base = params.base.as_deref();
+    let filters = PullFilters {
+        state,
+        base,
+        head: head.map(|h| h.branch),
+    };
+    let matches = |pr: &Value| pull_matches(pr, base, head.as_ref());
+
+    let paged = params.page.is_some() || params.limit.is_some();
+    let gitea_head = head.is_some() && forge.flavor().await == Flavor::Gitea;
+    if paged && !gitea_head {
+        let (prs, total) = forge
+            .list_pull_requests(
                 &params.owner,
                 &params.repo,
-                state,
-                Some(page),
-                Some(limit),
-            ))
-        })
-        .await
-        .map_err(to_mcp)?;
-        return gathered_result(&all.items, all.total, all.truncated);
+                &filters,
+                params.page,
+                params.limit,
+            )
+            .await
+            .map_err(to_mcp)?;
+        let items = into_items(prs);
+        if items.iter().all(matches) {
+            let slim: Vec<PullSummary> = items.iter().map(slim_pull).collect();
+            return paged_result(params.page, params.limit, total, &slim);
+        }
+        // The forge ignored a filter, so this is not the page asked for: walk the list instead.
     }
-    let (prs, total) = forge
-        .list_pull_requests(
+
+    let all = gather_all(|page, limit| {
+        Box::pin(forge.list_pull_requests(
             &params.owner,
             &params.repo,
-            state,
-            params.page,
-            params.limit,
-        )
-        .await
-        .map_err(to_mcp)?;
-    paged_result(params.page, params.limit, total, &into_items(prs))
+            &filters,
+            Some(page),
+            Some(limit),
+        ))
+    })
+    .await
+    .map_err(to_mcp)?;
+    let walked = all.items.len();
+    let items: Vec<PullSummary> = all
+        .items
+        .iter()
+        .filter(|pr| matches(pr))
+        .map(slim_pull)
+        .collect();
+    // The forge's count is of what it sent. Once filtering here has dropped some of that, the
+    // count is of what is left — known only if the walk was not cut short.
+    let total = if items.len() == walked {
+        all.total
+    } else if all.truncated {
+        None
+    } else {
+        Some(items.len())
+    };
+    gathered_result(&items, total, all.truncated)
 }
 
 /// Gets one pull request by index.
@@ -1219,7 +1492,7 @@ pub async fn get_pull_request(
         .get_pull_request(&params.owner, &params.repo, params.index)
         .await
         .map_err(to_mcp)?;
-    json_result(&pr)
+    json_result(&pull_detail(&pr))
 }
 
 /// Searches repositories by keyword.
@@ -2213,7 +2486,7 @@ pub async fn create_pull_request(
         .create_pull_request(&params.owner, &params.repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
-    json_result(&pull)
+    json_result(&pull_detail(&pull))
 }
 
 /// Parameters for the `comment_on_issue` tool.
@@ -2536,11 +2809,14 @@ struct AssetSummary {
     browser_download_url: Option<String>,
 }
 
-/// A release reduced to what identifies it and what can be downloaded from it.
+/// A release reduced to what identifies it, and to the names of its files.
 ///
-/// The raw object also carries the full uploader `User` and the tarball/zipball URLs; those are
-/// dropped here for the same reason the other list tools slim — a release list is otherwise
-/// mostly boilerplate.
+/// The raw object also carries the full uploader `User`, the tarball/zipball URLs and every
+/// asset in full; those are dropped. Assets are the bulk: each `forgejo/forgejo` release carries
+/// 21 (a binary, `.xz`, `.asc` and `.sha256` per platform), and listing 15 releases with each
+/// asset's id, size, download count and URL came to 66 KB. Their names alone are 11 KB, and are
+/// enough to say what a release ships; `list_release_assets` has the rest, including the id
+/// `delete_release_asset` takes.
 #[derive(Debug, Serialize)]
 struct ReleaseSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2559,8 +2835,24 @@ struct ReleaseSummary {
     html_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<String>,
-    /// Attached files. Empty for a release that has none.
-    assets: Vec<AssetSummary>,
+    /// How many files are attached. `0` for a release that has none.
+    asset_count: usize,
+    /// Their file names, in the forge's order. Empty for a release that has none.
+    asset_names: Vec<String>,
+}
+
+/// One release as `get_release`, `create_release` and `edit_release` report it: the summary, plus
+/// what only matters when looking at a single release.
+#[derive(Debug, Serialize)]
+struct ReleaseDetail {
+    #[serde(flatten)]
+    summary: ReleaseSummary,
+    /// The branch or commit the tag was created from, when the forge reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_commitish: Option<String>,
+    /// The release notes, as Markdown. Absent when there are none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
 }
 
 /// Projects one raw asset object onto [`AssetSummary`].
@@ -2580,42 +2872,62 @@ fn slim_asset(value: &Value) -> AssetSummary {
     }
 }
 
-/// Projects raw release objects down to [`ReleaseSummary`], flattening the uploader to a login.
-fn slim_releases(items: Vec<Value>) -> Vec<ReleaseSummary> {
-    items
-        .into_iter()
-        .map(|value: Value| ReleaseSummary {
-            id: value.get("id").and_then(Value::as_i64),
-            tag_name: value
-                .get("tag_name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            name: value
-                .get("name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            draft: value.get("draft").and_then(Value::as_bool),
-            prerelease: value.get("prerelease").and_then(Value::as_bool),
-            published_at: value
-                .get("published_at")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            html_url: value
-                .get("html_url")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            author: value
-                .get("author")
-                .and_then(|a| a.get("login"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            assets: value
-                .get("assets")
-                .and_then(Value::as_array)
-                .map(|assets| assets.iter().map(slim_asset).collect())
-                .unwrap_or_default(),
-        })
-        .collect()
+/// Projects one raw release onto [`ReleaseSummary`], flattening the uploader to a login and the
+/// assets to their names.
+fn slim_release(value: &Value) -> ReleaseSummary {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    let assets = value
+        .get("assets")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    ReleaseSummary {
+        id: value.get("id").and_then(Value::as_i64),
+        tag_name: text("tag_name"),
+        name: text("name"),
+        draft: value.get("draft").and_then(Value::as_bool),
+        prerelease: value.get("prerelease").and_then(Value::as_bool),
+        published_at: text("published_at"),
+        html_url: text("html_url"),
+        author: value
+            .get("author")
+            .and_then(|a| a.get("login"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        asset_count: assets.len(),
+        asset_names: assets
+            .iter()
+            .filter_map(|a| a.get("name").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect(),
+    }
+}
+
+/// Projects raw release objects down to [`ReleaseSummary`].
+fn slim_releases(items: &[Value]) -> Vec<ReleaseSummary> {
+    items.iter().map(slim_release).collect()
+}
+
+/// Projects one raw release onto [`ReleaseDetail`]. Empty notes count as none, since both forges
+/// send `""` for a release published without any.
+fn release_detail(value: &Value) -> ReleaseDetail {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    ReleaseDetail {
+        summary: slim_release(value),
+        target_commitish: text("target_commitish"),
+        body: text("body"),
+    }
 }
 
 /// Lists a repository's releases, newest first.
@@ -2629,7 +2941,7 @@ pub async fn list_releases(
         })
         .await
         .map_err(to_mcp)?;
-        return gathered_result(&slim_releases(all.items), all.total, all.truncated);
+        return gathered_result(&slim_releases(&all.items), all.total, all.truncated);
     }
     let (releases, total) = forge
         .list_releases(&params.owner, &params.repo, params.page, params.limit)
@@ -2639,7 +2951,7 @@ pub async fn list_releases(
         params.page,
         params.limit,
         total,
-        &slim_releases(into_items(releases)),
+        &slim_releases(&into_items(releases)),
     )
 }
 
@@ -2650,7 +2962,7 @@ pub async fn get_release(forge: &Forge, params: ReleaseTagRef) -> Result<CallToo
         .get_release_by_tag(&params.owner, &params.repo, &params.tag)
         .await
         .map_err(|e| release_404_hint(e, &params.owner, &params.repo))?;
-    json_result(&release)
+    json_result(&release_detail(&release))
 }
 
 /// Maps a release-endpoint error, disambiguating the one 404 that reads as something it is not.
@@ -2735,7 +3047,7 @@ pub async fn create_release(
         .create_release(&params.owner, &params.repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
-    json_result(&release)
+    json_result(&release_detail(&release))
 }
 
 /// Edits an existing release in place — its notes, title, tag, or draft/pre-release state.
@@ -2787,7 +3099,7 @@ pub async fn edit_release(
         )
         .await
         .map_err(|e| release_404_hint(e, &params.owner, &params.repo))?;
-    json_result(&release)
+    json_result(&release_detail(&release))
 }
 
 /// Reads a local file for upload, enforcing [`UploadPolicy`].
@@ -4034,7 +4346,7 @@ mod tests {
     }
 
     #[test]
-    fn releases_are_slimmed_to_their_identity_and_assets() {
+    fn releases_are_slimmed_to_their_identity_and_asset_names() {
         let raw = serde_json::json!([{
             "id": 42,
             "tag_name": "v3.3.1",
@@ -4055,7 +4367,7 @@ mod tests {
             }]
         }]);
 
-        let slimmed = slim_releases(into_items(raw));
+        let slimmed = slim_releases(&into_items(raw));
         assert_eq!(slimmed.len(), 1);
         let release = &slimmed[0];
         assert_eq!(release.id, Some(42));
@@ -4065,21 +4377,57 @@ mod tests {
             Some("brechanbech"),
             "the uploader should flatten to a login, dropping the rest of the User object"
         );
-        assert_eq!(release.assets.len(), 1);
-        assert_eq!(release.assets[0].id, Some(7));
-        assert_eq!(release.assets[0].size, Some(532_480));
+        assert_eq!(release.asset_count, 1);
+        assert_eq!(
+            release.asset_names,
+            vec!["xmcp-3.3.1-aarch64-apple-darwin.tar.gz".to_owned()]
+        );
 
         // The serialized form is what reaches the model: no email, no tarball boilerplate.
         let json = serde_json::to_string(&slimmed).unwrap();
         assert!(!json.contains("hidden@example.com"), "author email leaked");
         assert!(!json.contains("tarball_url"), "tarball boilerplate leaked");
+        // Per-asset detail is list_release_assets' job.
+        assert!(
+            !json.contains("browser_download_url"),
+            "asset detail leaked"
+        );
+        assert!(!json.contains("532480"), "asset size leaked");
     }
 
     #[test]
     fn a_release_without_assets_serializes_an_empty_list() {
         let raw = serde_json::json!([{ "id": 1, "tag_name": "v0.1.0" }]);
-        let slimmed = slim_releases(into_items(raw));
-        assert!(slimmed[0].assets.is_empty());
+        let slimmed = slim_releases(&into_items(raw));
+        assert_eq!(slimmed[0].asset_count, 0);
+        assert_eq!(slimmed[0].asset_names, Vec::<String>::new());
+    }
+
+    #[test]
+    fn one_release_adds_its_notes_and_target_to_the_summary() {
+        let raw = serde_json::json!({
+            "id": 42, "tag_name": "v0.20.6", "target_commitish": "main",
+            "body": "Refuse a short head_sha.",
+            "upload_url": "https://codeberg.org/…/assets",
+            "assets": [{ "id": 7, "name": "a.tar.gz" }, { "id": 8, "name": "a.tar.gz.sha256" }]
+        });
+        let json = serde_json::to_value(release_detail(&raw)).unwrap();
+        assert_eq!(json["body"], "Refuse a short head_sha.");
+        assert_eq!(json["target_commitish"], "main");
+        // The summary is flattened in, not nested.
+        assert_eq!(json["tag_name"], "v0.20.6");
+        assert_eq!(json["asset_count"], 2);
+        assert!(json.get("upload_url").is_none());
+        assert!(json.get("summary").is_none());
+
+        // Notes published as "" are reported as none.
+        let bare = serde_json::json!({ "id": 1, "body": "" });
+        assert!(
+            serde_json::to_value(release_detail(&bare))
+                .unwrap()
+                .get("body")
+                .is_none()
+        );
     }
 
     #[test]
@@ -5277,5 +5625,192 @@ index cc10f213c2..d3bf724104 100644
         assert_eq!(returned_run(Value::Null, true), None);
         // Gitea answers a job rerun with the job, whose `id` is not the run's.
         assert_eq!(returned_run(run, false), None);
+    }
+
+    #[test]
+    fn a_head_filter_is_a_branch_or_owner_colon_branch() {
+        assert_eq!(
+            HeadFilter::parse("fix/login").unwrap(),
+            HeadFilter {
+                owner: None,
+                branch: "fix/login"
+            }
+        );
+        assert_eq!(
+            HeadFilter::parse("khnorgaard:feat/x").unwrap(),
+            HeadFilter {
+                owner: Some("khnorgaard"),
+                branch: "feat/x"
+            }
+        );
+        for bad in ["", "owner:", ":branch"] {
+            assert!(HeadFilter::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Head and base of real pull requests on Codeberg, 24 October 2026: an ordinary one from a
+    /// fork (#14981), and an agit-flow one (#14984) whose `ref` is not its branch.
+    fn codeberg_pulls() -> (Value, Value) {
+        let fork = serde_json::json!({
+            "number": 14981,
+            "base": { "ref": "forgejo", "label": "forgejo" },
+            "head": {
+                "ref": "feat/7162-non-managed-certificates",
+                "label": "feat/7162-non-managed-certificates",
+                "repo": { "full_name": "khnorgaard/forgejo", "owner": { "login": "khnorgaard" } }
+            }
+        });
+        let agit = serde_json::json!({
+            "number": 14984,
+            "base": { "ref": "forgejo", "label": "forgejo" },
+            "head": {
+                "ref": "refs/pull/14984/head",
+                "label": "mahlzahn/fix_package_view_templates",
+                "repo": { "full_name": "forgejo/forgejo", "owner": { "login": "forgejo" } }
+            }
+        });
+        (fork, agit)
+    }
+
+    #[test]
+    fn the_head_filter_matches_a_branch_by_ref_or_label() {
+        let (fork, agit) = codeberg_pulls();
+        let head = |s| HeadFilter::parse(s).unwrap();
+        let branch = head("feat/7162-non-managed-certificates");
+        assert!(pull_matches(&fork, None, Some(&branch)));
+        assert!(!pull_matches(&agit, None, Some(&branch)));
+        // The agit-flow one is found by its label, as Forgejo's own filter finds it.
+        let topic = head("mahlzahn/fix_package_view_templates");
+        assert!(pull_matches(&agit, None, Some(&topic)));
+        assert!(!pull_matches(
+            &agit,
+            None,
+            Some(&head("fix_package_view_templates"))
+        ));
+    }
+
+    #[test]
+    fn owner_colon_branch_also_requires_the_fork() {
+        let (fork, _) = codeberg_pulls();
+        let head = |s| HeadFilter::parse(s).unwrap();
+        assert!(pull_matches(
+            &fork,
+            None,
+            Some(&head("KHNorgaard:feat/7162-non-managed-certificates"))
+        ));
+        assert!(!pull_matches(
+            &fork,
+            None,
+            Some(&head("someone-else:feat/7162-non-managed-certificates"))
+        ));
+    }
+
+    #[test]
+    fn the_base_filter_matches_the_target_branch() {
+        let (fork, _) = codeberg_pulls();
+        assert!(pull_matches(&fork, Some("forgejo"), None));
+        assert!(!pull_matches(&fork, Some("v16.0/forgejo"), None));
+        // No filters: everything matches, so an unfiltered page is passed on untouched.
+        assert!(pull_matches(&fork, None, None));
+    }
+
+    #[test]
+    fn a_fork_pull_request_keeps_its_branches_and_drops_the_embedded_objects() {
+        // Codeberg #14981's shape, trimmed: an ordinary pull request from a fork.
+        let raw = serde_json::json!({
+            "number": 14981, "title": "feat: non-managed certificates", "state": "open",
+            "merged": false, "draft": false, "mergeable": true,
+            "user": { "login": "khnorgaard", "email": "k@example.com" },
+            "labels": [{ "name": "forgejo/ui", "color": "eb6420", "description": "User interface" }],
+            "base": { "ref": "forgejo", "repo": { "full_name": "forgejo/forgejo", "stars_count": 5702 } },
+            "head": {
+                "ref": "feat/7162-non-managed-certificates",
+                "label": "feat/7162-non-managed-certificates",
+                "sha": "6df19ae47ff50b506f529b808e4c0992afe0963d",
+                "repo": { "full_name": "khnorgaard/forgejo", "owner": { "login": "khnorgaard" } }
+            },
+            "created_at": "2026-10-23T12:33:08+02:00",
+            "closed_at": null, "merged_at": null,
+            "html_url": "https://codeberg.org/forgejo/forgejo/pulls/14981"
+        });
+        let s = slim_pull(&raw);
+        assert_eq!(s.base.as_deref(), Some("forgejo"));
+        assert_eq!(
+            s.head.as_deref(),
+            Some("feat/7162-non-managed-certificates")
+        );
+        assert_eq!(s.head_repo.as_deref(), Some("khnorgaard/forgejo"));
+        assert_eq!(
+            s.head_sha.as_deref(),
+            Some("6df19ae47ff50b506f529b808e4c0992afe0963d")
+        );
+        assert_eq!(s.author.as_deref(), Some("khnorgaard"));
+        assert_eq!(s.labels, vec!["forgejo/ui".to_owned()]);
+        assert_eq!((s.closed_at.clone(), s.merged_at.clone()), (None, None));
+
+        let json = serde_json::to_string(&s).unwrap();
+        for leaked in ["k@example.com", "stars_count", "eb6420"] {
+            assert!(!json.contains(leaked), "{leaked} leaked");
+        }
+    }
+
+    #[test]
+    fn an_agit_pull_request_reports_its_label_as_the_head_and_no_fork() {
+        // Codeberg #14984: `ref` is the pull ref, the branch is in `label`, and the head
+        // repository is the base repository.
+        let raw = serde_json::json!({
+            "number": 14984,
+            "base": { "ref": "forgejo", "repo": { "full_name": "forgejo/forgejo" } },
+            "head": {
+                "ref": "refs/pull/14984/head",
+                "label": "mahlzahn/fix_package_view_templates",
+                "repo": { "full_name": "forgejo/forgejo" }
+            }
+        });
+        let s = slim_pull(&raw);
+        assert_eq!(
+            s.head.as_deref(),
+            Some("mahlzahn/fix_package_view_templates")
+        );
+        assert_eq!(s.head_repo, None);
+    }
+
+    #[test]
+    fn one_pull_request_adds_its_body_reviewers_and_merge_details() {
+        let raw = serde_json::json!({
+            "number": 7, "state": "closed", "merged": true,
+            "body": "Fixes #6.",
+            "merged_by": { "login": "brechanbech", "email": "x@example.com" },
+            "merge_commit_sha": "8a65a14a7150319759b5dfad587f584f30e4b2e2",
+            "requested_reviewers": [{ "login": "Gusted", "email": "g@example.com" }],
+            "assignees": null,
+            "milestone": { "title": "v1.0", "description": "first" },
+            "comments": 1, "review_comments": 0
+        });
+        let d = pull_detail(&raw);
+        assert_eq!(d.summary.merged, Some(true));
+        assert_eq!(d.body.as_deref(), Some("Fixes #6."));
+        assert_eq!(d.merged_by.as_deref(), Some("brechanbech"));
+        assert_eq!(d.requested_reviewers, vec!["Gusted".to_owned()]);
+        assert_eq!(d.assignees, Vec::<String>::new());
+        assert_eq!(d.milestone.as_deref(), Some("v1.0"));
+
+        let json = serde_json::to_value(&d).unwrap();
+        // Flattened, and the empty assignee list is left out rather than sent as [].
+        assert_eq!(json["number"], 7);
+        assert!(json.get("summary").is_none());
+        assert!(json.get("assignees").is_none());
+        assert!(
+            !json.to_string().contains("@example.com"),
+            "an email leaked"
+        );
+    }
+
+    #[test]
+    fn a_listing_without_a_state_asks_for_open_explicitly() {
+        // Both forges default `…/pulls` to every state, so "open by default" has to be sent.
+        assert_eq!(state_or_open(None).unwrap(), "open");
+        assert_eq!(state_or_open(Some("ALL")).unwrap(), "all");
+        assert!(state_or_open(Some("merged")).is_err());
     }
 }

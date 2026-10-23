@@ -8,7 +8,7 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
-## [0.20.7] — 2026-10-24
+## [0.21.0] — 2026-10-24
 
 ### Added
 - `cancel_workflow_run` and `rerun_workflow`, both in write mode. Cancel needs
@@ -22,6 +22,31 @@ records what changed, that one records why.
   exist. An instance without the endpoint answers with a plain-text `404`,
   unlike the JSON `404` for an unknown run. That is reported as a missing API,
   with the version the instance reports, and nothing is rerun.
+- `list_pull_requests` takes `base` and `head` branch filters. With
+  `state=open`, it can answer whether a branch already has an open pull request
+  without listing them all. `head` is a branch name, or `owner:branch` to
+  require the fork as well. Forgejo 16+ filters by both. Gitea filters only by
+  base, so there the head filter walks the list and filters it locally. Every
+  answer is checked against both filters, because a forge that lacks one
+  ignores it rather than refusing it.
+
+### Changed
+- Releases list their asset names instead of every asset in full.
+  `list_releases` gives each release `asset_count` and `asset_names`, so 15
+  `forgejo/forgejo` releases, with 21 files each, go from 66 KB of assets to
+  11 KB. Each asset's id, size, download count and URL are in
+  `list_release_assets`, which also gives the id `delete_release_asset` needs.
+- `get_release`, `create_release` and `edit_release` return the same slim
+  shape, plus the release notes and `target_commitish`, instead of the raw
+  API object (about 8 KB per release on `forgejo/forgejo`).
+- Pull requests are slimmed. The raw object was 12–15 KB, with both
+  repositories embedded and the author's and reviewers' full profiles,
+  including email addresses. `list_pull_requests` gives number, title, state,
+  `merged`, `draft`, `mergeable`, `base`, `head`, `head_repo` (for a fork),
+  `head_sha`, author, label names and dates. `get_pull_request` and
+  `create_pull_request` add the description, `merged_by`, merge commit, merge
+  base, assignees, requested reviewers, milestone, comment counts and
+  `diff_url`.
 
 ### Fixed
 - gitea.com was detected as Forgejo. It now reports version `29.0.0`, and
@@ -38,6 +63,12 @@ records what changed, that one records why.
 - Dispatched and scheduled Forgejo runs reported no `event`. Forgejo leaves
   `event` empty for those runs and names the trigger in `trigger_event`, which
   is now read first.
+- `list_pull_requests` without a `state` now returns open pull requests, as it
+  always claimed to. It had been returning every state, because the tool sent
+  no `state` and both forges default pull requests to all of them. On
+  `forgejo/forgejo` that is 10,350 instead of 154, and the auto-paginated
+  listing stopped at its 1,000-item cap. `state=open` is now sent explicitly,
+  for issues too, though issues already defaulted to open.
 
 ### Security
 - tokio 1.52.3 → 1.54.1, for RUSTSEC-2026-0386 (`AsyncFd::new` and related
