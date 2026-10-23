@@ -51,29 +51,19 @@ impl Flavor {
 
     /// Classifies an instance from the `version` string `GET /version` returns.
     ///
-    /// Two signals, in order:
+    /// One signal: Forgejo advertises its Gitea API compatibility in its own version string —
+    /// Codeberg reports `16.0.0-dev-785-465b60ef+gitea-1.22.0`, and older releases
+    /// `7.0.4+0-gitea-1.22.0`. Gitea never names itself in its version
+    /// (`29.0.0+dev-160-g55186ca39b`), so the `gitea-` marker means Forgejo, counter-intuitive
+    /// as that reads. Anything without it is Gitea.
     ///
-    /// 1. Forgejo advertises its Gitea API compatibility in its own version string —
-    ///    Codeberg reports `16.0.0-dev-741-6f391573+gitea-1.22.0`, and older releases
-    ///    `7.0.4+0-gitea-1.22.0`. Gitea never names itself in its version
-    ///    (`1.27.0+dev-954-g1f3981a301`), so the `gitea-` marker means Forgejo, counter-
-    ///    intuitive as that reads.
-    /// 2. Failing that, the major version: Gitea is still on 1.x, Forgejo renumbered to 7
-    ///    and beyond, so a major of 2 or more is Forgejo.
-    ///
-    /// Anything else is treated as Gitea, which only costs a wrong guess on an unreleased
-    /// Forgejo that has dropped the compatibility marker and gone back to 1.x — and
+    /// The major version is no signal any more. Until v0.20.6 a major of 2 or more also meant
+    /// Forgejo, because Gitea was still on 1.x; gitea.com then started reporting 29.0.0 and was
+    /// taken for Forgejo. A Forgejo that dropped the marker would now be taken for Gitea —
     /// `FORGEJO_FLAVOR` exists for that.
     #[must_use]
     pub fn classify(version: &str) -> Self {
         if version.to_ascii_lowercase().contains("gitea-") {
-            return Self::Forgejo;
-        }
-        let major = version
-            .split(['.', '-', '+'])
-            .next()
-            .and_then(|s| s.parse::<u32>().ok());
-        if major.is_some_and(|m| m >= 2) {
             Self::Forgejo
         } else {
             Self::Gitea
@@ -930,6 +920,54 @@ impl Forge {
             )
             .await
     }
+
+    /// `POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel` — cancel a pending or running
+    /// run. Forgejo 16+ and Gitea, same path.
+    ///
+    /// Forgejo answers `204` — also for a run that has already finished, which it leaves alone —
+    /// and Gitea answers with the run. The body is returned as is: [`Value::Null`] from
+    /// Forgejo.
+    pub async fn cancel_workflow_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .post_bare(&format!(
+                "repos/{owner}/{repo}/actions/runs/{run_id}/cancel"
+            ))
+            .await
+    }
+
+    /// Reruns a finished run, or one job of it and the jobs that depend on it. Forgejo 17+ and
+    /// Gitea; the path depends on the flavor, see [`rerun_path`].
+    ///
+    /// Forgejo answers `204`, so [`Value::Null`]; Gitea answers with the run it restarted, or
+    /// for a job rerun with the job.
+    pub async fn rerun_workflow(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: i64,
+        job_id: Option<i64>,
+    ) -> Result<Value, ForgeError> {
+        let path = rerun_path(self.flavor().await, owner, repo, run_id, job_id);
+        self.rest.post_bare(&path).await
+    }
+}
+
+/// Builds the rerun path, per flavor. The whole-run path is the same on both; a single job is
+/// addressed on its own by Forgejo but under its run by Gitea, so a Forgejo job rerun never uses
+/// `run_id`.
+fn rerun_path(flavor: Flavor, owner: &str, repo: &str, run_id: i64, job_id: Option<i64>) -> String {
+    match (flavor, job_id) {
+        (_, None) => format!("repos/{owner}/{repo}/actions/runs/{run_id}/rerun"),
+        (Flavor::Forgejo, Some(job)) => format!("repos/{owner}/{repo}/actions/jobs/{job}/rerun"),
+        (Flavor::Gitea, Some(job)) => {
+            format!("repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job}/rerun")
+        }
+    }
 }
 
 /// Builds the path and query for a workflow-run listing, per flavor.
@@ -1023,14 +1061,17 @@ fn dispatch_body(
 mod tests {
     use super::*;
 
-    /// Real `GET /version` strings, read off both live instances on 15 September 2026.
-    const CODEBERG: &str = "16.0.0-dev-741-6f391573+gitea-1.22.0";
-    const GITEA_COM: &str = "1.27.0+dev-954-g1f3981a301";
+    /// Real `GET /version` strings, read off both live instances on 24 October 2026.
+    const CODEBERG: &str = "16.0.0-dev-785-465b60ef+gitea-1.22.0";
+    const GITEA_COM: &str = "29.0.0+dev-160-g55186ca39b";
+    /// What gitea.com reported on 15 September 2026, before it left the 1.x line.
+    const GITEA_COM_1X: &str = "1.27.0+dev-954-g1f3981a301";
 
     #[test]
     fn live_version_strings_classify_correctly() {
         assert_eq!(Flavor::classify(CODEBERG), Flavor::Forgejo);
         assert_eq!(Flavor::classify(GITEA_COM), Flavor::Gitea);
+        assert_eq!(Flavor::classify(GITEA_COM_1X), Flavor::Gitea);
     }
 
     #[test]
@@ -1044,10 +1085,11 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_free_major_version_falls_back_to_the_version_number() {
-        // Forgejo renumbered past Gitea's 1.x line, so a major of 2+ is Forgejo even without
-        // the compatibility marker.
-        assert_eq!(Flavor::classify("16.0.0"), Flavor::Forgejo);
+    fn without_the_marker_the_major_version_decides_nothing() {
+        // Gitea left the 1.x line (gitea.com reports 29.0.0), so a high major is no longer
+        // Forgejo: only the marker is.
+        assert_eq!(Flavor::classify("29.0.0"), Flavor::Gitea);
+        assert_eq!(Flavor::classify("16.0.0"), Flavor::Gitea);
         assert_eq!(Flavor::classify("1.22.3"), Flavor::Gitea);
         // Unparseable: treated as Gitea, which FORGEJO_FLAVOR exists to override.
         assert_eq!(Flavor::classify(""), Flavor::Gitea);
@@ -1166,6 +1208,25 @@ mod tests {
             assert_eq!(body["inputs"]["level"], "debug");
             assert_eq!(body["ref"], "main");
         }
+    }
+
+    #[test]
+    fn a_job_rerun_is_addressed_per_flavor_and_a_run_rerun_is_not() {
+        for flavor in [Flavor::Forgejo, Flavor::Gitea] {
+            assert_eq!(
+                rerun_path(flavor, "o", "r", 7, None),
+                "repos/o/r/actions/runs/7/rerun"
+            );
+        }
+        // Forgejo addresses a job on its own; Gitea nests it under its run.
+        assert_eq!(
+            rerun_path(Flavor::Forgejo, "o", "r", 7, Some(9)),
+            "repos/o/r/actions/jobs/9/rerun"
+        );
+        assert_eq!(
+            rerun_path(Flavor::Gitea, "o", "r", 7, Some(9)),
+            "repos/o/r/actions/runs/7/jobs/9/rerun"
+        );
     }
 
     #[tokio::test]

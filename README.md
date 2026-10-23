@@ -13,7 +13,7 @@ Forgejo/Gitea REST API.
 > reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `edit_repo`,
 > `create_branch`, `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`,
 > `migrate_repo`, push-mirror
-> management, and `dispatch_workflow`) gated behind a separate write token and a deliberate,
+> management, `dispatch_workflow`, `cancel_workflow_run` and `rerun_workflow`) gated behind a separate write token and a deliberate,
 > time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
 It speaks the Forgejo REST API directly through a small, in-house client (`src/forgejo/client.rs`,
@@ -87,10 +87,10 @@ tools ever ask. Set `FORGEJO_FLAVOR` to `forgejo` or `gitea` to pin it if the de
 guesses wrong on your instance.
 
 > The detection reads oddly on purpose: **Forgejo names Gitea in its own version string**
-> (Codeberg reports `16.0.0-dev-741-6f391573+gitea-1.22.0`) to advertise API compatibility,
-> while Gitea never names itself (`1.27.0+dev-954-g1f3981a301`). So a `gitea-` marker means
-> Forgejo. Failing that marker, the major version decides: Gitea is still 1.x, Forgejo
-> renumbered to 7 and beyond.
+> (Codeberg reports `16.0.0-dev-785-465b60ef+gitea-1.22.0`) to advertise API compatibility,
+> while Gitea never names itself (`29.0.0+dev-160-g55186ca39b`). So a `gitea-` marker means
+> Forgejo, and anything without it is Gitea. The major version is no guide: Gitea has left the
+> 1.x line, and before v0.20.7 that made gitea.com look like Forgejo.
 
 Where the two forges differ, and what the server does about it:
 
@@ -105,6 +105,9 @@ Where the two forges differ, and what the server does about it:
 | `workflow_dispatch` reply | the created run (`return_run_info`) | `204 No Content` | Forgejo's run is passed through; on Gitea the tool returns an acknowledgement and tells the caller to find the run with `list_workflow_runs` |
 | Workflow directory | `.forgejo/workflows`, `.github/workflows` | `.gitea/workflows`, `.github/workflows` | Mentioned in the `dispatch_workflow` tool description |
 | Jobs of a run | bare array; no timestamps or steps | `{ jobs, total_count }`, with timestamps and steps | Unwrapped and normalized like runs; what Forgejo omits stays absent |
+| Cancel and rerun reply | `204 No Content` | the run (`200`/`201`); a job for a job rerun | The run from the reply where there is one, otherwise read back; reported in `list_workflow_runs`' shape |
+| Rerun one job | `…/actions/jobs/{job_id}/rerun` | `…/actions/runs/{run}/jobs/{job_id}/rerun` | Translated; `run_id` is required on both |
+| Cancel a finished run | `204`, left unchanged | unverified; its spec lists a `409 Conflict` | Errors surfaced as-is; on success the returned run's `status` says what happened |
 
 Translating rather than sending both spellings is deliberate: an unknown query parameter is
 *ignored*, not rejected, so sending Forgejo's `ref` to Gitea would silently return **unfiltered**
@@ -257,6 +260,8 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `upload_release_asset` | **write** | Attach a **local file** to a release. Confined to `FORGEJO_UPLOAD_ROOT`; disabled entirely when that is unset |
 | `delete_release_asset` | **write** | Remove one asset by `attachment_id` — needed to replace a same-named file, which Forgejo would otherwise keep alongside |
 | `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run on Forgejo, an acknowledgement on Gitea |
+| `cancel_workflow_run` | **write** | Cancel a pending or running run (owner/repo/`run_id`); answers with the run as it now stands. Forgejo 16+ |
+| `rerun_workflow` | **write** | Rerun a finished run, or with `job_id` one job and the jobs that depend on it; answers with the run. Forgejo 17+ — an instance without the endpoint is reported as such, with its version, and nothing is rerun |
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole

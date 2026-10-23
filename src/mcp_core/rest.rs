@@ -358,8 +358,22 @@ impl RestClient {
     /// # Errors
     /// Propagates transport and non-2xx ([`ApiError::Status`]) failures.
     pub async fn post_empty(&self, path: &str) -> Result<(), ApiError> {
-        self.request(Method::POST, path, &[], None).await?;
+        self.post_bare(path).await?;
         Ok(())
+    }
+
+    /// `POST` with no body, returning whatever the server answers — [`Value::Null`] for an empty
+    /// `204`. For action endpoints that one forge answers with a resource and another with
+    /// nothing.
+    ///
+    /// # Errors
+    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures.
+    pub async fn post_bare(&self, path: &str) -> Result<Value, ApiError> {
+        Ok(self
+            .request(Method::POST, path, &[], None)
+            .await?
+            .0
+            .unwrap_or(Value::Null))
     }
 
     /// `DELETE`, discarding any (typically empty) body.

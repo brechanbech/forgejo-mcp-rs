@@ -3635,6 +3635,164 @@ pub async fn dispatch_workflow(
     json_result(&run)
 }
 
+/// Parameters for the `rerun_workflow` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct RerunWorkflowParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Workflow run id (the `id` field from `list_workflow_runs`). Required even with
+    /// `job_id`: Gitea addresses a job under its run, and the answer reads the run back.
+    pub run_id: i64,
+    /// Rerun only this job, and the jobs that depend on it, instead of the whole run — the
+    /// job `id` from `list_workflow_jobs`.
+    #[serde(default)]
+    pub job_id: Option<i64>,
+}
+
+/// Whether an error says the instance has no such endpoint at all, rather than no such run.
+///
+/// Both forges answer a path their router does not know with Go's plain-text
+/// `404 page not found`, while a handler's own 404 — `run with id …: resource does not exist` —
+/// is JSON. Seen on Codeberg and gitea.com on 24 October 2026, for `GET` and `POST` alike. A
+/// `405` would mean the path exists for another method only, which is as good as absent.
+fn is_missing_endpoint(err: &ForgeError) -> bool {
+    match err {
+        ForgeError::Status { code, body } => {
+            *code == StatusCode::METHOD_NOT_ALLOWED
+                || (*code == StatusCode::NOT_FOUND && serde_json::from_str::<Value>(body).is_err())
+        }
+        _ => false,
+    }
+}
+
+/// Picks the run a cancel or rerun answered with, if the answer is one — Gitea's is, Forgejo's
+/// empty `204` is not. A job (Gitea's answer to a job rerun) is not a run, so the caller says
+/// whether a run is to be expected at all.
+fn returned_run(body: Value, expect_run: bool) -> Option<Value> {
+    (expect_run && body.get("id").is_some()).then_some(body)
+}
+
+/// Answers a successful cancel or rerun with the run as it now stands, in the shape
+/// `list_workflow_runs` uses: the run the forge answered with, or else the run read back.
+///
+/// Forgejo answers both actions with an empty `204`, and its cancel is a no-op on a finished
+/// run, so there only the run itself says what happened. The action has already succeeded if
+/// the read fails, so that is a note, not an error.
+async fn run_after(
+    forge: &Forge,
+    params: &RunRef,
+    returned: Option<Value>,
+    mut out: serde_json::Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let run = match returned {
+        Some(run) => Ok(run),
+        None => {
+            forge
+                .get_workflow_run(&params.owner, &params.repo, params.run_id)
+                .await
+        }
+    };
+    match run {
+        Ok(run) => {
+            let run = serde_json::to_value(normalize_run(&run))
+                .map_err(|e| McpError::internal_error(format!("serializing the run: {e}"), None))?;
+            out.insert("run".to_owned(), run);
+        }
+        Err(e) => {
+            out.insert(
+                "note".to_owned(),
+                Value::String(format!(
+                    "The request succeeded, but reading run {} back failed: {e}",
+                    params.run_id
+                )),
+            );
+        }
+    }
+    json_result(&Value::Object(out))
+}
+
+/// The error for an instance without an action's endpoint: what it lacks, which Forgejo
+/// release added it, and the version the instance reports — fetched only now, on the way out.
+async fn missing_endpoint(forge: &Forge, err: &ForgeError, action: &str, since: &str) -> McpError {
+    let version = forge
+        .server_version()
+        .await
+        .ok()
+        .and_then(|v| v.get("version").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+    // The router's plain-text body ends in a newline, which would land inside the parentheses.
+    let err = err.to_string();
+    let err = err.trim_end();
+    McpError::invalid_params(
+        format!(
+            "this instance has no API for {action} ({err}) — Forgejo added it in {since}; this \
+             instance reports version {version}. Nothing was changed."
+        ),
+        None,
+    )
+}
+
+/// Cancels a pending or running workflow run, on Forgejo 16+ or Gitea.
+pub async fn cancel_workflow_run(
+    forge: &Forge,
+    params: RunRef,
+) -> Result<CallToolResult, McpError> {
+    let body = match forge
+        .cancel_workflow_run(&params.owner, &params.repo, params.run_id)
+        .await
+    {
+        Ok(body) => body,
+        Err(e) if is_missing_endpoint(&e) => {
+            return Err(missing_endpoint(forge, &e, "cancelling a run", "v16").await);
+        }
+        Err(e) => return Err(to_mcp(e)),
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("cancel_requested".to_owned(), Value::Bool(true));
+    run_after(forge, &params, returned_run(body, true), out).await
+}
+
+/// Reruns a finished workflow run, or one job of it and the jobs that depend on it — on
+/// Forgejo 17+ or Gitea.
+///
+/// No version check up front: Codeberg's version string names a development build, which says
+/// nothing reliable about which routes it has. The request is made, and a missing route —
+/// harmless, since nothing ran — is reported as such, with the version the instance gives.
+pub async fn rerun_workflow(
+    forge: &Forge,
+    params: RerunWorkflowParams,
+) -> Result<CallToolResult, McpError> {
+    let body = match forge
+        .rerun_workflow(&params.owner, &params.repo, params.run_id, params.job_id)
+        .await
+    {
+        Ok(body) => body,
+        Err(e) if is_missing_endpoint(&e) => {
+            let action = if params.job_id.is_some() {
+                "rerunning a job"
+            } else {
+                "rerunning a run"
+            };
+            return Err(missing_endpoint(forge, &e, action, "v17").await);
+        }
+        Err(e) => return Err(to_mcp(e)),
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("rerun_requested".to_owned(), Value::Bool(true));
+    if let Some(job_id) = params.job_id {
+        out.insert("job_id".to_owned(), Value::from(job_id));
+    }
+    let returned = returned_run(body, params.job_id.is_none());
+    let run = RunRef {
+        owner: params.owner,
+        repo: params.repo,
+        run_id: params.run_id,
+    };
+    run_after(forge, &run, returned, out).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5063,5 +5221,44 @@ index cc10f213c2..d3bf724104 100644
         assert!(err.message.contains("full commit SHA"), "{}", err.message);
         assert!(full_sha("main").is_err());
         assert!(full_sha(&"g".repeat(40)).is_err(), "hex only");
+    }
+
+    fn status(code: u16, body: &str) -> ForgeError {
+        ForgeError::Status {
+            code: StatusCode::from_u16(code).unwrap(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_plain_text_404_is_a_missing_endpoint_and_a_json_404_a_missing_run() {
+        // Both bodies as Codeberg and gitea.com sent them on 24 October 2026: the router's own
+        // answer for an unknown path, and the handler's for an unknown run.
+        assert!(is_missing_endpoint(&status(404, "404 page not found\n")));
+        assert!(!is_missing_endpoint(&status(
+            404,
+            r#"{"message":"run with id 999999999: resource does not exist","url":"https://codeberg.org/api/swagger"}"#
+        )));
+        assert!(is_missing_endpoint(&status(405, "")));
+    }
+
+    #[test]
+    fn other_failures_are_not_mistaken_for_a_missing_endpoint() {
+        assert!(!is_missing_endpoint(&status(
+            401,
+            r#"{"message":"token is required"}"#
+        )));
+        assert!(!is_missing_endpoint(&status(409, "")));
+        assert!(!is_missing_endpoint(&status(500, "internal error")));
+    }
+
+    #[test]
+    fn only_a_run_in_the_answer_stands_in_for_reading_it_back() {
+        let run = serde_json::json!({ "id": 7, "status": "cancelled" });
+        assert_eq!(returned_run(run.clone(), true), Some(run.clone()));
+        // Forgejo's empty 204.
+        assert_eq!(returned_run(Value::Null, true), None);
+        // Gitea answers a job rerun with the job, whose `id` is not the run's.
+        assert_eq!(returned_run(run, false), None);
     }
 }

@@ -8,6 +8,33 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.20.7] — 2026-10-24
+
+### Added
+- `cancel_workflow_run` and `rerun_workflow`, both in write mode. Cancel needs
+  Forgejo 16+ and rerun Forgejo 17+; Gitea has both. `rerun_workflow` with
+  `job_id` reruns one job and the jobs that depend on it.
+- Both answer with the run as it now stands, in `list_workflow_runs`' shape.
+  Forgejo's reply is an empty `204`, and its cancel succeeds on a run that has
+  already finished, so only the run's `status` says what happened.
+- Rerun does not check the version first. Codeberg reports a development build
+  of Forgejo 16, so the version number does not say reliably which routes
+  exist. An instance without the endpoint answers with a plain-text `404`,
+  unlike the JSON `404` for an unknown run. That is reported as a missing API,
+  with the version the instance reports, and nothing is rerun.
+
+### Fixed
+- gitea.com was detected as Forgejo. It now reports version `29.0.0`, and
+  detection still took any major version of 2 or more to mean Forgejo. On
+  gitea.com, `list_workflow_runs` silently ignored its `ref` and `workflow`
+  filters, and `dispatch_workflow` sent a field Gitea refuses. Detection now
+  relies on the `+gitea-` compatibility marker that Forgejo puts in its version
+  string, and nothing else. `FORGEJO_FLAVOR` still overrides it.
+
+### Security
+- tokio 1.52.3 → 1.54.1, for RUSTSEC-2026-0386 (`AsyncFd::new` and related
+  constructors violate I/O safety). This is a lockfile change only.
+
 ## [0.20.6] — 2026-10-23
 
 ### Fixed

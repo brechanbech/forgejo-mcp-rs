@@ -152,6 +152,8 @@ token-broker process, which is out of scope.
 | `list_workflow_runs` | **done** | Actions runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. |
 | `get_workflow_run` | **done** | One Actions run by id (a run's outcome is its `status`). |
 | `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run by workflow file name. |
+| `cancel_workflow_run` | **done** | Write-mode. Cancel a pending or running run (v0.20.7). |
+| `rerun_workflow` | **done** | Write-mode. Rerun a finished run, or one job of it (v0.20.7; Forgejo 17+). |
 
 Each tool returns the relevant Forgejo API JSON, pretty-printed. Full-resource endpoints pass
 the raw response straight through; the slimmed tools (repositories, branches, notifications,
@@ -211,6 +213,8 @@ landed across v0.3–v0.11 and are listed in the README's current tool table rat
 | `list_workflow_runs` | **done** | Runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. A run's outcome is its `status` (no separate `conclusion`). |
 | `get_workflow_run` | **done** | One run by internal `id` (not `index_in_repo`, despite the web URL). |
 | `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run, keyed by workflow file name (no list-workflows API — discover via `get_file_contents`). |
+| `cancel_workflow_run` | **done** | Write-mode, v0.20.7. Cancel a pending or running run; answers with the run. |
+| `rerun_workflow` | **done** | Write-mode, v0.20.7. Rerun a finished run, or with `job_id` one job and its dependents. Forgejo 17+; a missing endpoint is reported as such. |
 
 `list_workflow_runs` unwraps the endpoint's `{ workflow_runs, total_count }` body (no
 `X-Total-Count` header), so it does not auto-paginate. A `404` from these endpoints means the
@@ -427,8 +431,10 @@ The heuristic reads backwards and the code says so: **Forgejo names Gitea in its
 string** — Codeberg reports `16.0.0-dev-741-6f391573+gitea-1.22.0`, older releases
 `7.0.4+0-gitea-1.22.0` — to advertise API compatibility, while Gitea never names itself
 (`1.27.0+dev-954-g1f3981a301`). A `gitea-` marker therefore means Forgejo. Failing that marker,
-the major version decides: Gitea is still on 1.x, Forgejo renumbered to 7 and beyond, so 2+ is
-Forgejo. Both live strings are pinned as constants in the client's unit tests.
+the major version decided: Gitea was still on 1.x, Forgejo renumbered to 7 and beyond, so 2+ was
+Forgejo. *(Corrected in v0.20.7: gitea.com now reports `29.0.0`, so the major version is no
+signal and only the marker counts — see [v0.20.7](#v0207--cancel-and-rerun-and-gitea-detection-fixed).)*
+The live strings are pinned as constants in the client's unit tests.
 
 Detection is lazy rather than done at startup for two reasons: `from_env` is synchronous and does
 no network, and an instance that is briefly down should not prevent the server from starting.
@@ -664,6 +670,66 @@ which ignores `?step=` and would ignore `?q=` too, returning an unfiltered log t
 believes it filtered. That is the same silent-filter trap the run filters were translated to
 avoid. Worth revisiting once those parameters are live where this server is used.
 
+### v0.20.7 — cancel and rerun, and Gitea detection fixed
+
+Two write tools, both gated by write mode like `dispatch_workflow`:
+
+- **`cancel_workflow_run`** — `POST …/actions/runs/{run_id}/cancel`, Forgejo 16+ and Gitea,
+  same path. Codeberg has it (an unauthenticated `POST` gets `401`, not `404`).
+- **`rerun_workflow`** — a finished run, or with `job_id` one job and the jobs that depend on it.
+  Forgejo 17+ and Gitea. The whole-run path is shared; a single job is
+  `…/actions/jobs/{job_id}/rerun` on Forgejo but `…/actions/runs/{run}/jobs/{job_id}/rerun` on
+  Gitea, so `run_id` is required even with `job_id`.
+
+**Both answer with the run, not an acknowledgement.** Forgejo answers both with an empty `204`,
+and its cancel succeeds on a run that has already finished and leaves it alone, so "cancelled"
+would not say whether anything was cancelled. The tool reads the run back and returns it in
+`list_workflow_runs`' shape, so its `status` says what happened. Gitea answers with the run
+itself, which is used instead of a second request; its answer to a job rerun is the job, so that
+case reads the run back too. A failed read-back after a successful action is a note, not an
+error, because the action did succeed.
+
+**Rerun on Forgejo 16: try, don't check the version.** Codeberg reports
+`16.0.0-dev-785-465b60ef+gitea-1.22.0`, a development build, so its version number does not say
+reliably which routes exist. A `>= 17` check would refuse an instance that has the endpoint,
+with no way round it. The request is made instead, which costs nothing when the route is
+missing, because nothing runs. The two kinds of `404` can be told apart. Probed on Codeberg and
+gitea.com on 24 October 2026, for `GET` and `POST` alike:
+
+| request | answer |
+|---|---|
+| a path the router does not know (`…/runs/{id}/rerun` on Codeberg) | `404`, plain text `404 page not found` |
+| a known path, unknown run (`…/runs/999999999`) | `404`, JSON `{"message":"run with id 999999999: resource does not exist",…}` |
+
+A non-JSON `404`, or a `405`, is reported as "this instance has no API for rerunning a run",
+naming the Forgejo release that added it and the version the instance reports. That version is
+fetched only on this failure path. A JSON `404` is passed through as before. Cancel uses the same
+check, for Forgejo before 16.
+
+**Gitea detection, fixed.** gitea.com now reports `29.0.0+dev-160-g55186ca39b`: Gitea has left the
+1.x line. The second signal in [v0.20](#v020--gitea-support)'s heuristic, "a major of 2 or more
+is Forgejo", therefore classified gitea.com as Forgejo. Every Actions call there used Forgejo's
+spellings. The run filters `ref` and `workflow_id` were silently ignored rather than rejected,
+and `dispatch_workflow` sent the `return_run_info` field Gitea refuses. Now only the `gitea-`
+marker means Forgejo, and anything without it is Gitea. A Forgejo build that dropped the marker
+would be taken for Gitea; `FORGEJO_FLAVOR` pins it. The job-log verification of 23 October ran
+under the wrong flavor. The paths it used are shared, and Forgejo's request for a job listing
+merely omits Gitea's `limit`, so its result stands. It did not test what it was believed to.
+
+**Verified live on Codeberg on 24 October 2026**, through the installed binary over MCP and in
+write mode. CI was dispatched on this repository (run 40, id 7968548) and cancelled at once;
+the answer showed `status: cancelled`, five seconds after it was created. Cancelling the same
+run a second time also succeeded and showed the same run unchanged, which is Forgejo's no-op on a
+finished run. `rerun_workflow` on that run, for the whole run and with a `job_id`, came back
+as "no API for rerunning a run / a job", naming v17 and Codeberg's reported version. It
+changed nothing.
+
+Not verified: rerun actually working, which needs a Forgejo 17 instance, and Codeberg has not
+moved to 17 yet. On Gitea there is no account with Actions to test on (gitea.com's free tier
+has no runners), and firing someone else's CI is not an option. Both tools are therefore
+unproven on Gitea, as `dispatch_workflow` is, until a self-hosted Gitea with a runner exists.
+
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -737,15 +803,15 @@ crate out of its own release path.
 
 ## Non-goals
 
-- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~49 endpoints this
+- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~52 endpoints this
   server touches, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
-- No webhooks or admin tooling. CI control is limited to `dispatch_workflow`, and **artifacts
-  and run-wide log archives are not retrieved**. Per-job logs *are*, since v0.20.5's
-  `get_job_log` (see [Actions job logs](#v0205--actions-job-logs)): the objection was only
-  ever to *unbounded* output, and a ranged read answers it. The run-wide `…/runs/{id}/logs` ZIP
-  is still out, because it has no `Range` support and so cannot be bounded.
+- No webhooks or admin tooling. CI control is limited to dispatching, cancelling and
+  rerunning runs, and **artifacts and run-wide log archives are not retrieved**. Per-job logs
+  *are*, since v0.20.5's `get_job_log` (see [Actions job logs](#v0205--actions-job-logs)): the
+  objection was only ever to *unbounded* output, and a ranged read answers it. The run-wide
+  `…/runs/{id}/logs` ZIP is still out, because it has no `Range` support and so cannot be bounded.
 
 ### CI status: dropped via commit-status, later solved via the Actions-runs API (v0.12.0)
 
@@ -828,5 +894,7 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     `get_combined_status`, `get_repo_tree`. *(done)*
 13. **v0.20.5** — Actions job logs: `list_workflow_jobs` and `get_job_log`, bounded by HTTP
     `Range`. *(done)*
-14. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
+14. **v0.20.7** — `cancel_workflow_run` and `rerun_workflow`, and Gitea detection by the
+    compatibility marker alone. *(done; cancel verified live on Codeberg, rerun awaits Forgejo 17)*
+15. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
     through raw.
