@@ -9,17 +9,18 @@
 //! local shapes first.
 
 use crate::mcp_core::{
-    decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
+    ByteRange, decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use reqwest::StatusCode;
 use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::client::{Forge, RunFilters};
+use super::client::{Forge, ForgeError, RunFilters};
 
 /// Returns the authenticated user — proof the token works.
 pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
@@ -3156,6 +3157,390 @@ pub async fn get_workflow_run(forge: &Forge, params: RunRef) -> Result<CallToolR
     json_result(&run)
 }
 
+/// One job of a workflow run, in one shape on both forges — a translation for the same reason
+/// [`RunSummary`] is one. Forgejo's per-run listing is sparse (no timestamps, no steps); Gitea's
+/// carries both, so most fields here are present on Gitea only.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct JobSummary {
+    /// What `get_job_log` takes as `job_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// The outcome where there is one, else the phase — Gitea's `conclusion` promoted, exactly
+    /// as for runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    /// Gitea's raw `conclusion`; never present on Forgejo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conclusion: Option<String>,
+    /// Forgejo's `attempt`, Gitea's `run_attempt` — above 1 once the job has been re-run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<i64>,
+    /// Runner labels — Forgejo's `runs_on`, Gitea's `labels`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runs_on: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html_url: Option<String>,
+    /// The job's steps, where the listing includes them (Gitea does; Forgejo does not).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<StepSummary>,
+}
+
+/// One step of a job: enough to name the step that failed.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct StepSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+}
+
+/// Reads an array of strings from the first of `keys` that holds one.
+fn first_str_list(v: &Value, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .find_map(|k| v.get(*k)?.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The outcome-or-phase status shared by runs, jobs and steps: Gitea's `conclusion` once it has
+/// one, else `status`. On Forgejo, which has no `conclusion`, this is simply `status`.
+fn outcome(v: &Value) -> Option<String> {
+    first_str(v, &["conclusion"]).or_else(|| first_str(v, &["status"]))
+}
+
+/// Projects one raw job — Forgejo's `ActionRunJob` or Gitea's `ActionWorkflowJob` — onto
+/// [`JobSummary`]. Allow-listed, which drops Forgejo's `handle`, `task_id` and owner/repo ids and
+/// Gitea's runner identity and API URLs.
+fn normalize_job(job: &Value) -> JobSummary {
+    let steps = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .map(|s| StepSummary {
+                    number: first_i64(s, &["number"]),
+                    name: first_str(s, &["name"]),
+                    status: outcome(s),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    JobSummary {
+        id: first_i64(job, &["id"]),
+        name: first_str(job, &["name"]),
+        status: outcome(job),
+        conclusion: first_str(job, &["conclusion"]),
+        attempt: first_i64(job, &["attempt", "run_attempt"]),
+        runs_on: first_str_list(job, &["runs_on", "labels"]),
+        started: first_str(job, &["started", "started_at"]),
+        stopped: first_str(job, &["stopped", "completed_at"]),
+        html_url: first_str(job, &["html_url"]),
+        steps,
+    }
+}
+
+/// Lists the jobs of one workflow run — the step between "this run failed" and reading the log
+/// of the job that failed it.
+///
+/// Forgejo answers with a bare array; Gitea wraps it as `{ jobs, total_count }`. Both are
+/// unwrapped here, and `truncated` is set only if Gitea reports more jobs than it returned.
+pub async fn list_workflow_jobs(forge: &Forge, params: RunRef) -> Result<CallToolResult, McpError> {
+    let body = forge
+        .list_workflow_jobs(&params.owner, &params.repo, params.run_id)
+        .await
+        .map_err(to_mcp)?;
+    let (items, total) = match body {
+        Value::Object(mut map) => (
+            into_items(map.remove("jobs").unwrap_or(Value::Null)),
+            map.get("total_count")
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok()),
+        ),
+        other => (into_items(other), None),
+    };
+    let jobs: Vec<JobSummary> = items
+        .iter()
+        .filter(|v| v.is_object())
+        .map(normalize_job)
+        .collect();
+    let truncated = total.is_some_and(|t| t > jobs.len());
+    gathered_result(&jobs, total, truncated)
+}
+
+/// Default window on a job log, in raw bytes. A failed job's error is at its tail, and 32 KiB
+/// is a few hundred lines — more once timestamps and colour codes are stripped.
+const LOG_DEFAULT_BYTES: u64 = 32 * 1024;
+
+/// Ceiling on one window. A whole log is unbounded — a long build runs to megabytes — so a larger
+/// request is refused rather than quietly clamped; page through with `offset` instead.
+const LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Parameters for reading part of a job's log.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct JobLogParams {
+    /// Repository owner — user or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Job id — the `id` field from `list_workflow_jobs`, not the run id.
+    pub job_id: i64,
+    /// Read forward from this byte offset instead of returning the tail. Take it from the
+    /// `earlier` or `later` field of a previous call.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Window size in raw log bytes (default 32768, at most 1048576), trimmed to whole lines.
+    /// Counted before timestamps and colour codes are stripped, so the text returned is shorter.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+    /// Keep each line's timestamp (default false — they are about a third of a log's bytes).
+    #[serde(default)]
+    pub timestamps: bool,
+}
+
+/// Which part of a log to fetch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogWindow {
+    /// The last `n` bytes.
+    Tail(u64),
+    /// `len` bytes from `offset`.
+    From { offset: u64, len: u64 },
+}
+
+impl LogWindow {
+    /// The `Range` header for this window. Each asks for one byte more, *before* the window, so
+    /// [`cut_lines`] can tell whether the window opens on a line boundary or mid-line.
+    fn range_header(self) -> String {
+        match self {
+            Self::Tail(n) => format!("bytes=-{}", n + 1),
+            Self::From { offset, len } => {
+                format!("bytes={}-{}", offset.saturating_sub(1), offset + len - 1)
+            }
+        }
+    }
+}
+
+/// Where a window of a log landed: `start..end` in offsets of the whole log, and `span`, the same
+/// bytes as indices into what the server sent.
+#[derive(Debug, PartialEq, Eq)]
+struct LogCut {
+    start: u64,
+    end: u64,
+    span: std::ops::Range<usize>,
+}
+
+/// A byte offset as an index. Log windows are capped at [`LOG_MAX_BYTES`], so this saturates
+/// only on a corrupt `Content-Range`, which then fails the bounds check as an empty window.
+fn as_index(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// Cuts `window` out of what the server sent, trimmed to whole lines.
+///
+/// The server may have honoured the range or ignored it and sent the whole log; `served` says
+/// which, so the window is found the same way either way. A partial first line is dropped unless
+/// the byte before it — requested for exactly this — is a newline, and a partial last line is
+/// dropped unless the window reaches the end of the log. A window with no newline in it at all is
+/// one over-long line, and is returned as it is rather than emptied.
+fn cut_lines(served: &ByteRange, window: LogWindow) -> LogCut {
+    let bytes = &served.bytes;
+    let base = served.start;
+    let have_end = base + bytes.len() as u64;
+    let total = served.total.unwrap_or(have_end);
+    let (lo, hi) = match window {
+        LogWindow::Tail(n) => (total.saturating_sub(n), total),
+        LogWindow::From { offset, len } => (offset, offset.saturating_add(len)),
+    };
+    let lo = lo.clamp(base, have_end);
+    let hi = hi.clamp(lo, have_end);
+    let (mut s, mut e) = (as_index(lo - base), as_index(hi - base));
+
+    let opens_on_line = lo == 0 || (s > 0 && bytes[s - 1] == b'\n');
+    if !opens_on_line && let Some(i) = bytes[s..e].iter().position(|&b| b == b'\n') {
+        s += i + 1;
+    }
+    if hi < total
+        && let Some(i) = bytes[s..e].iter().rposition(|&b| b == b'\n')
+    {
+        e = s + i + 1;
+    }
+    LogCut {
+        start: base + s as u64,
+        end: base + e as u64,
+        span: s..e,
+    }
+}
+
+/// Strips ANSI escape sequences: CSI (`ESC [` … final byte — colours, cursor moves), OSC
+/// (`ESC ]` … `BEL` or `ESC \` — the hyperlinks Forgejo 17 renders), and any other two-character
+/// `ESC x`. Pure presentation, and on a cargo build they are on most lines.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // Stops at a newline too, so an unterminated OSC costs one line, not the log.
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\x07' => break,
+                        // The string terminator is `ESC \`; take the backslash with it.
+                        '\x1b' => {
+                            chars.next();
+                            break;
+                        }
+                        '\n' => {
+                            out.push('\n');
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Drops the runner's timestamp from the front of a log line — `2026-09-27T12:25:29.0387087Z `.
+/// Only a prefix that looks like one is removed; any other line passes through whole.
+fn strip_timestamp(line: &str) -> &str {
+    let Some((head, rest)) = line.split_once(' ') else {
+        return line;
+    };
+    let b = head.as_bytes();
+    let is_stamp = b.len() >= 20
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[10] == b'T'
+        && head.ends_with('Z');
+    if is_stamp { rest } else { line }
+}
+
+/// Makes a raw log window readable: escape sequences out, and timestamps too unless kept.
+fn clean_log(raw: &str, timestamps: bool) -> String {
+    let text = strip_ansi(raw);
+    if timestamps {
+        return text;
+    }
+    text.split_inclusive('\n').map(strip_timestamp).collect()
+}
+
+/// Reads part of one job's log — the tail by default, since that is where a failure is.
+///
+/// The log is fetched by HTTP `Range`, never whole, unless the server ignores the range. The
+/// answer gives the window's byte offsets in the whole log and, where there is more, the
+/// `earlier` / `later` windows to ask for next, so a caller walks back from the tail without
+/// arithmetic of its own.
+pub async fn get_job_log(forge: &Forge, params: JobLogParams) -> Result<CallToolResult, McpError> {
+    let len = params.max_bytes.unwrap_or(LOG_DEFAULT_BYTES);
+    if len == 0 || len > LOG_MAX_BYTES {
+        return Err(McpError::invalid_params(
+            format!(
+                "max_bytes must be between 1 and {LOG_MAX_BYTES} — page through a longer log \
+                 with offset"
+            ),
+            None,
+        ));
+    }
+    let window = params
+        .offset
+        .map_or(LogWindow::Tail(len), |offset| LogWindow::From {
+            offset,
+            len,
+        });
+    let past_end = |offset: u64| {
+        McpError::invalid_params(
+            format!(
+                "offset {offset} is past the end of job {}'s log",
+                params.job_id
+            ),
+            None,
+        )
+    };
+
+    let served = match forge
+        .get_job_log(
+            &params.owner,
+            &params.repo,
+            params.job_id,
+            &window.range_header(),
+        )
+        .await
+    {
+        Ok(served) => served,
+        // A range wholly past the end. For the tail that can only be an empty log — a job that
+        // has not written anything yet — which is an answer, not an error.
+        Err(ForgeError::Status { code, .. }) if code == StatusCode::RANGE_NOT_SATISFIABLE => {
+            match window {
+                LogWindow::From { offset, .. } => return Err(past_end(offset)),
+                LogWindow::Tail(_) => ByteRange {
+                    bytes: Vec::new(),
+                    start: 0,
+                    total: Some(0),
+                },
+            }
+        }
+        Err(e) => return Err(to_mcp(e)),
+    };
+    // A server that ignored the range sent the whole log, so an offset past its end arrives as
+    // a 200 rather than a 416; it is the same mistake either way.
+    if let (LogWindow::From { offset, .. }, Some(total)) = (window, served.total)
+        && offset > total
+    {
+        return Err(past_end(offset));
+    }
+
+    let cut = cut_lines(&served, window);
+    let raw = String::from_utf8_lossy(&served.bytes[cut.span.clone()]);
+    let mut out = serde_json::json!({
+        "job_id": params.job_id,
+        "start": cut.start,
+        "end": cut.end,
+        "total_bytes": served.total,
+        "log": clean_log(&raw, params.timestamps),
+    });
+    if let Some(obj) = out.as_object_mut() {
+        if cut.start > 0 {
+            let offset = cut.start.saturating_sub(len);
+            obj.insert(
+                "earlier".to_owned(),
+                serde_json::json!({ "offset": offset, "max_bytes": cut.start - offset }),
+            );
+        }
+        if served.total.is_some_and(|total| cut.end < total) {
+            obj.insert("later".to_owned(), serde_json::json!({ "offset": cut.end }));
+        }
+    }
+    json_result(&out)
+}
+
 /// Parameters for the `dispatch_workflow` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct DispatchWorkflowParams {
@@ -4224,7 +4609,7 @@ mod tests {
 
         // start_line past the end is empty, not an error — the window says why.
         let (text, window) = slice_lines(SAMPLE, Some(99), None, 5).unwrap();
-        assert!(text.is_empty());
+        assert_eq!(text, "");
         assert_eq!(window, Some((99, 5)));
 
         // start_line 0 is nonsense in a 1-indexed scheme; treat it as line 1.
@@ -4374,5 +4759,220 @@ index cc10f213c2..d3bf724104 100644
             "keeps the added line from go.mod"
         );
         assert!(!only_mod.contains("go-chi/captcha"), "no bleed from go.sum");
+    }
+
+    // --- workflow jobs and job logs ---
+
+    #[test]
+    fn a_forgejo_job_normalizes_without_inventing_what_it_lacks() {
+        // Verbatim from Codeberg (brechanbech/forgejo-mcp-rs run 7311558): Forgejo's per-run
+        // listing has no timestamps, steps or URL, and those must stay absent, not empty.
+        let job = serde_json::json!({
+            "id": 13_391_796, "run_id": 7_311_558, "attempt": 1,
+            "handle": "3bae7b1d-18ff-43c1-8cad-53fc12498dfb", "repo_id": 2_123_516,
+            "owner_id": 728_880, "name": "check", "needs": null,
+            "runs_on": ["codeberg-medium"], "task_id": 9_885_636, "status": "success"
+        });
+        let v = serde_json::to_value(normalize_job(&job)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "id": 13_391_796, "name": "check", "status": "success", "attempt": 1,
+                "runs_on": ["codeberg-medium"]
+            })
+        );
+    }
+
+    #[test]
+    fn a_gitea_job_normalizes_onto_the_same_shape() {
+        // Shaped from Gitea's published `ActionWorkflowJob` schema, and matching what gitea.com
+        // returned for gitea/tea run 1118217: a `status`/`conclusion` split on steps as well.
+        let job = serde_json::json!({
+            "id": 42, "run_id": 7, "name": "lint", "status": "completed",
+            "conclusion": "failure", "run_attempt": 2, "labels": ["ubuntu-latest"],
+            "started_at": "2026-10-01T10:00:00Z", "completed_at": "2026-10-01T10:03:00Z",
+            "html_url": "https://gitea.com/o/r/actions/runs/7/jobs/0",
+            "runner_name": "runner-1", "url": "https://gitea.com/api/v1/…",
+            "steps": [
+                { "number": 1, "name": "checkout", "status": "completed", "conclusion": "success" },
+                { "number": 2, "name": "make lint", "status": "completed", "conclusion": "failure" }
+            ]
+        });
+        let s = normalize_job(&job);
+        assert_eq!(
+            s.status.as_deref(),
+            Some("failure"),
+            "conclusion is promoted"
+        );
+        assert_eq!(s.conclusion.as_deref(), Some("failure"));
+        assert_eq!(s.attempt, Some(2));
+        assert_eq!(s.runs_on, ["ubuntu-latest"]);
+        assert_eq!(s.stopped.as_deref(), Some("2026-10-01T10:03:00Z"));
+        assert_eq!(s.steps[1].name.as_deref(), Some("make lint"));
+        assert_eq!(s.steps[1].status.as_deref(), Some("failure"));
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("runner_name").is_none() && v.get("url").is_none());
+    }
+
+    /// A stand-in for a server that honours `Range`, answering as Go's `http.ServeContent` does.
+    fn serve(log: &[u8], range: &str) -> ByteRange {
+        let total = log.len() as u64;
+        let spec = range.strip_prefix("bytes=").unwrap();
+        let (a, b) = if let Some(n) = spec.strip_prefix('-') {
+            (total.saturating_sub(n.parse().unwrap()), total)
+        } else {
+            let (a, b) = spec.split_once('-').unwrap();
+            (
+                a.parse().unwrap(),
+                (b.parse::<u64>().unwrap() + 1).min(total),
+            )
+        };
+        ByteRange {
+            bytes: log[as_index(a)..as_index(b)].to_vec(),
+            start: a,
+            total: Some(total),
+        }
+    }
+
+    /// Fetches `window` from `log` through [`serve`] and returns the cut and its text.
+    fn fetch(log: &[u8], window: LogWindow) -> (LogCut, String) {
+        let served = serve(log, &window.range_header());
+        let cut = cut_lines(&served, window);
+        let text = String::from_utf8(served.bytes[cut.span.clone()].to_vec()).unwrap();
+        (cut, text)
+    }
+
+    /// Ten numbered lines of nine bytes each (`line 000\n` …), so offsets are easy to reason
+    /// about: line `k` occupies `9k..9k+9`.
+    fn ten_lines() -> Vec<u8> {
+        (0..10)
+            .flat_map(|k| format!("line {k:03}\n").into_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn the_tail_drops_a_partial_first_line() {
+        let log = ten_lines();
+        // 20 bytes reach back into the middle of line 7.
+        let (cut, text) = fetch(&log, LogWindow::Tail(20));
+        assert_eq!(text, "line 008\nline 009\n");
+        assert_eq!((cut.start, cut.end), (72, 90));
+    }
+
+    #[test]
+    fn the_tail_keeps_a_first_line_that_starts_exactly_on_the_window() {
+        let log = ten_lines();
+        // The byte before the window is a newline, so line 8 is whole and must be kept.
+        let (cut, text) = fetch(&log, LogWindow::Tail(18));
+        assert_eq!(text, "line 008\nline 009\n");
+        assert_eq!(cut.start, 72);
+    }
+
+    #[test]
+    fn a_forward_window_ends_on_a_whole_line() {
+        let log = ten_lines();
+        let (cut, text) = fetch(&log, LogWindow::From { offset: 9, len: 22 });
+        assert_eq!(text, "line 001\nline 002\n");
+        assert_eq!((cut.start, cut.end), (9, 27));
+    }
+
+    #[test]
+    fn walking_back_from_the_tail_is_seamless() {
+        // The paging contract: the `earlier` window a call reports ends exactly where that call
+        // began, so walking back loses and repeats nothing.
+        let log = ten_lines();
+        let len = 25;
+        let (tail, mut text) = fetch(&log, LogWindow::Tail(len));
+        let mut start = tail.start;
+        while start > 0 {
+            let offset = start.saturating_sub(len);
+            let (cut, earlier) = fetch(
+                &log,
+                LogWindow::From {
+                    offset,
+                    len: start - offset,
+                },
+            );
+            assert_eq!(
+                cut.end, start,
+                "earlier window must end where the last began"
+            );
+            text.insert_str(0, &earlier);
+            start = cut.start;
+        }
+        assert_eq!(text.as_bytes(), log.as_slice());
+    }
+
+    #[test]
+    fn a_server_that_ignores_the_range_is_cut_locally() {
+        let log = ten_lines();
+        let whole = ByteRange {
+            bytes: log.clone(),
+            start: 0,
+            total: Some(log.len() as u64),
+        };
+        let cut = cut_lines(&whole, LogWindow::Tail(20));
+        assert_eq!(&log[cut.span], b"line 008\nline 009\n");
+    }
+
+    #[test]
+    fn an_empty_log_is_an_empty_window() {
+        let empty = ByteRange {
+            bytes: Vec::new(),
+            start: 0,
+            total: Some(0),
+        };
+        let cut = cut_lines(&empty, LogWindow::Tail(1024));
+        assert_eq!((cut.start, cut.end), (0, 0));
+    }
+
+    #[test]
+    fn an_over_long_line_is_returned_rather_than_emptied() {
+        let log = vec![b'x'; 100];
+        let (cut, text) = fetch(&log, LogWindow::Tail(10));
+        assert_eq!(text.len(), 10);
+        assert_eq!(cut.end, 100);
+    }
+
+    #[test]
+    fn colour_codes_are_stripped() {
+        // Verbatim from a Codeberg cargo log: bold, bright green, reset.
+        assert_eq!(
+            strip_ansi("\x1b[1m\x1b[92m   Doc-tests\x1b[0m forgejo_mcp_rs"),
+            "   Doc-tests forgejo_mcp_rs"
+        );
+    }
+
+    #[test]
+    fn hyperlinks_keep_their_text() {
+        // OSC 8, with both terminators.
+        let link = "see \x1b]8;;https://x.test/\x1b\\the docs\x1b]8;;\x07 now";
+        assert_eq!(strip_ansi(link), "see the docs now");
+    }
+
+    #[test]
+    fn an_unterminated_osc_costs_one_line() {
+        assert_eq!(strip_ansi("a\x1b]8;;broken\nnext\n"), "a\nnext\n");
+    }
+
+    #[test]
+    fn timestamps_are_stripped_only_where_they_are() {
+        assert_eq!(
+            strip_timestamp("2026-09-27T12:30:18.7383845Z 🏁  Job succeeded\n"),
+            "🏁  Job succeeded\n"
+        );
+        assert_eq!(strip_timestamp("2026-09-27T12:30:14.3964960Z \n"), "\n");
+        assert_eq!(strip_timestamp("plain line\n"), "plain line\n");
+        assert_eq!(strip_timestamp("2026 was a year\n"), "2026 was a year\n");
+    }
+
+    #[test]
+    fn clean_log_strips_both_or_keeps_timestamps_on_request() {
+        let raw = "2026-09-27T12:30:14.3978135Z \x1b[1mok\x1b[0m\n2026-09-27T12:30:15.0Z done\n";
+        assert_eq!(clean_log(raw, false), "ok\ndone\n");
+        assert_eq!(
+            clean_log(raw, true),
+            "2026-09-27T12:30:14.3978135Z ok\n2026-09-27T12:30:15.0Z done\n"
+        );
     }
 }

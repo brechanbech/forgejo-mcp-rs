@@ -8,6 +8,34 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.20.5] — 2026-10-23
+
+### Added
+- `list_workflow_jobs` and `get_job_log`. The server could say *that* a CI run
+  failed but not why. Forgejo 16 added per-job endpoints, and Gitea serves the
+  same paths. List the run's jobs, then read the failed job's log.
+- `get_job_log` returns the tail, the last 32 KiB by default, because that is
+  where a failure is. It is fetched with an HTTP `Range` request, not
+  downloaded whole, and cut to whole lines. `earlier` and `later` give the next
+  window to ask for, so walking back from the tail loses and repeats nothing.
+  `max_bytes` goes up to 1 MiB, and a larger request is refused.
+- Colour codes and per-line timestamps are stripped. On this repository's own
+  CI they are most lines and about a third of the bytes respectively.
+  `timestamps=true` keeps the timestamps.
+- `list_workflow_jobs` normalizes both forges like `list_workflow_runs`.
+  Gitea's `conclusion` is promoted into `status`. Forgejo reports no
+  timestamps or steps in this listing, and they stay absent there rather than
+  appearing empty.
+
+### Security
+- TLS dependencies updated in the lockfile for four advisories published
+  since 0.20.4: `rustls` 0.23.46 (RUSTSEC-2026-0346, `Debug` exposing session
+  secrets; RUSTSEC-2026-0347, data sent to the outer server after an ECH
+  rejection), `rustls-webpki` 0.103.16 (RUSTSEC-2026-0382, distrusted
+  intermediates accepted) and `webpki-roots` 1.0.11 (RUSTSEC-2026-0381,
+  distrusted emSign intermediates in the bundled roots). All semver-compatible;
+  `cargo install` users pick them up by reinstalling.
+
 ## [0.20.4] — 2026-09-27
 
 ### Added

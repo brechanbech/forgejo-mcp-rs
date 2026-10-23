@@ -6,7 +6,7 @@
 //! [`Zeroizing`] string and wiped on drop, and the `Authorization` header is marked sensitive so
 //! it never lands in logs.
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_RANGE, HeaderValue, RANGE};
 use reqwest::{Client, Method, RequestBuilder, multipart};
 use serde_json::Value;
 use url::Url;
@@ -52,6 +52,31 @@ impl std::fmt::Debug for RestClient {
             .field("api_root", &self.api_root.as_str())
             .finish_non_exhaustive()
     }
+}
+
+/// Part of a document fetched with an HTTP `Range` request, placed within the whole.
+#[derive(Debug)]
+pub struct ByteRange {
+    /// The bytes served.
+    pub bytes: Vec<u8>,
+    /// Offset of `bytes[0]` within the whole document — `0` when the server ignored the range
+    /// and sent everything.
+    pub start: u64,
+    /// The whole document's length, when known: from `Content-Range` on a `206`, or the body
+    /// itself on a `200`. `None` only when a `206` reports the length as `*`.
+    pub total: Option<u64>,
+}
+
+/// Reads `(start, total)` from a `Content-Range` value such as `bytes 41895-42394/42395`.
+///
+/// Only the first offset and the length are taken; the last offset is not parsed, because Go's
+/// `http.ServeContent` — which both forges use — writes `bytes 0--1/0` for a suffix range over an
+/// empty file, and that should still read as "start 0, length 0".
+fn parse_content_range(value: &str) -> Option<(u64, Option<u64>)> {
+    let rest = value.trim().strip_prefix("bytes ")?;
+    let (span, total) = rest.split_once('/')?;
+    let start = span.split_once('-')?.0.parse().ok()?;
+    Some((start, total.parse().ok()))
 }
 
 /// Builds the `page` / `limit` query pairs, skipping any that are unset.
@@ -225,6 +250,51 @@ impl RestClient {
             .map_err(|e| ApiError::Config(format!("response was not valid UTF-8: {e}")))
     }
 
+    /// `GET` of part of a raw text document, by HTTP `Range` — e.g. `bytes=-4096` for the last
+    /// 4 KiB of an Actions job log, which is too large to take whole.
+    ///
+    /// A server may honour the range (`206`) or ignore it and send everything (`200`). Both come
+    /// back as a [`ByteRange`] that says where its bytes sit in the whole, so the caller can cut
+    /// the window itself when the server didn't. The bytes are not decoded: a range can split a
+    /// multi-byte character, so decoding is left until the caller has trimmed to line edges.
+    ///
+    /// # Errors
+    /// Propagates transport and non-2xx ([`ApiError::Status`]) failures — including `416` for a
+    /// range that lies wholly past the end of the document.
+    pub async fn get_text_range(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        range: &str,
+    ) -> Result<ByteRange, ApiError> {
+        let req = self
+            .begin(Method::GET, path, query, "text/plain")?
+            .header(RANGE, range);
+        let resp = req.send().await.map_err(ApiError::Transport)?;
+        let status = resp.status();
+        let content_range = resp
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_range);
+        let bytes = resp.bytes().await.map_err(ApiError::Transport)?.to_vec();
+
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            return Err(ApiError::Status { code: status, body });
+        }
+        // `Content-Range` is only meaningful on a 206; on a 200 the body is the whole document.
+        let (start, total) = match content_range {
+            Some(placed) if status == reqwest::StatusCode::PARTIAL_CONTENT => placed,
+            _ => (0, Some(bytes.len() as u64)),
+        };
+        Ok(ByteRange {
+            bytes,
+            start,
+            total,
+        })
+    }
+
     /// `POST` of a JSON body returning the created resource.
     ///
     /// # Errors
@@ -310,5 +380,37 @@ impl RestClient {
             .strip_suffix(&self.api_prefix)
             .unwrap_or_else(|| self.api_root.as_str())
             .to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_content_range;
+
+    #[test]
+    fn content_range_gives_start_and_total() {
+        // Verbatim from Codeberg's job-log endpoint answering `Range: bytes=-500`.
+        assert_eq!(
+            parse_content_range("bytes 41895-42394/42395"),
+            Some((41895, Some(42395)))
+        );
+    }
+
+    #[test]
+    fn content_range_with_unknown_length_keeps_the_start() {
+        assert_eq!(parse_content_range("bytes 0-99/*"), Some((0, None)));
+    }
+
+    /// Go's `ServeContent` answers a suffix range over an empty file with a negative end offset.
+    #[test]
+    fn content_range_of_an_empty_document_still_parses() {
+        assert_eq!(parse_content_range("bytes 0--1/0"), Some((0, Some(0))));
+    }
+
+    #[test]
+    fn content_range_rejects_other_units_and_garbage() {
+        assert_eq!(parse_content_range("items 0-1/2"), None);
+        assert_eq!(parse_content_range("bytes */42395"), None);
+        assert_eq!(parse_content_range(""), None);
     }
 }

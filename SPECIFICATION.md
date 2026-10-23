@@ -607,6 +607,60 @@ matter rather than discovered by a caller.
 `list_repo_contents` was considered and rejected: `get_file_contents` already lists a directory,
 and an empty path lists the root — confirmed against a live instance rather than assumed.
 
+### v0.20.5 — Actions job logs
+
+Two read tools that get from "this run failed" to "this is why". Forgejo 16 added the endpoints
+(`GET …/actions/runs/{run_id}/jobs` and `GET …/actions/jobs/{job_id}/logs`), and Gitea serves
+the same paths.
+
+- **`list_workflow_jobs`** — the jobs of one run, normalized the way runs are. The two bodies
+  differ: Forgejo answers with a bare array and no paging, Gitea with `{ jobs, total_count }`.
+  Forgejo's listing is also sparse, with no timestamps, steps or URL (its v17 adds steps, but
+  only on the single-job endpoint). Those fields are optional and stay absent on Forgejo rather
+  than appearing empty. Gitea is asked for 50 jobs, its usual ceiling, and `truncated` is set if
+  its `total_count` says that still fell short.
+- **`get_job_log`** — part of one job's log, never the whole of it. The design points:
+  - *Ranged, tail first.* The default is the last 32 KiB, because that is where a failure is.
+    The window is fetched with `Range: bytes=-N`, which Codeberg honours with a `206` and a
+    `Content-Range` giving the log's full length. Ceiling 1 MiB; a larger `max_bytes` is refused,
+    not clamped.
+  - *Whole lines.* A byte range starts and ends mid-line, and can split a UTF-8 character. Each
+    request asks for **one extra byte before the window**, so the cut can tell whether the window
+    opens on a line boundary (that byte is `\n`) or mid-line (drop up to the first newline). The
+    end is trimmed back to the last newline unless the window reaches the end of the log. Only
+    then are the bytes decoded.
+  - *Paging without arithmetic.* The answer carries `start`/`end` in whole-log offsets, plus
+    `earlier: { offset, max_bytes }` and `later: { offset }`. The `earlier` window ends exactly
+    where the current one began, so walking back from the tail neither loses nor repeats a line.
+    A unit test walks a whole log back that way and checks the result is byte-identical.
+  - *A server that ignores `Range`* sends everything with a `200`. The client reports where the
+    bytes it got sit in the whole, and the same cut runs locally, so the answer is identical
+    either way. A `416` on a tail read can only mean an empty log (a job that has written nothing
+    yet) and is answered as one. On an `offset` read it means the offset is past the end, which
+    is reported as the caller's error.
+  - *Stripped by default.* Probed on this repository's own CI: every line carries a 29-byte
+    timestamp (about 36% of the log), and 411 of 529 lines carry ANSI colour codes. Both are
+    removed: CSI sequences, and OSC sequences (Forgejo 17 renders OSC 8 hyperlinks).
+    `timestamps=true` keeps the timestamps. `max_bytes` counts raw bytes, so the text returned
+    is shorter than the window.
+
+**Verified live on 23 October 2026**, through the installed binary over MCP:
+- Codeberg (`brechanbech/forgejo-mcp-rs` run 7311558): the tail, then its `earlier` window,
+  which ended at exactly the byte where the tail began.
+- gitea.com (`gitea/tea` run 1118217, a failed run): the job listing, with per-step outcomes
+  naming the failed step, and the log tail. Gitea's timestamps have the same format, and are
+  stripped the same way.
+
+One thing the probe showed: a job's tail is not always its error. On Gitea the last ~2 KiB of
+a failed job is the checkout action's post-run cleanup, so a caller may need to page back with
+`earlier`, or raise `max_bytes`, to reach the failing step's output.
+
+Not taken up, deliberately: the run-wide ZIP (unbounded, no `Range`), and Forgejo 17's
+`?step=`, `?q=` substring filter and `?format=ndjson`. Codeberg still runs a Forgejo 16 build,
+which ignores `?step=` and would ignore `?q=` too, returning an unfiltered log to a caller that
+believes it filtered. That is the same silent-filter trap the run filters were translated to
+avoid. Worth revisiting once those parameters are live where this server is used.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -680,18 +734,15 @@ crate out of its own release path.
 
 ## Non-goals
 
-- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~47 endpoints this
+- Not a full Forgejo SDK — the in-house `mcp_core` client covers only the ~49 endpoints this
   server touches, not the whole REST surface.
 - **Local git operations are out of scope.** Clients with shell access (Claude Code) already
   run `git` directly; this server is about the *remote* forge API.
-- No webhooks or admin tooling. CI control is limited to `dispatch_workflow`, and **logs and
-  artifacts are not retrieved** — but note the reason has changed. This was justified by "Forgejo
-  exposes no repo-level endpoint for it", which is no longer accurate: Forgejo v16 serves per-job
-  logs, and `goern/forgejo-mcp` reads them bounded and resumable (`offset` + `max_bytes`,
-  defaulting to the tail) after enumerating a run's jobs — the run-wide ZIP endpoint is the one
-  with no `Range` support. So the real objection was only ever to *unbounded* logs, and that is
-  solvable. Reading a failed job's tail is a candidate, not an impossibility. Unverified here
-  against a live v16 instance.
+- No webhooks or admin tooling. CI control is limited to `dispatch_workflow`, and **artifacts
+  and run-wide log archives are not retrieved**. Per-job logs *are*, since v0.20.5's
+  `get_job_log` (see [Actions job logs](#v0205--actions-job-logs)): the objection was only
+  ever to *unbounded* output, and a ranged read answers it. The run-wide `…/runs/{id}/logs` ZIP
+  is still out, because it has no `Range` support and so cannot be bounded.
 
 ### CI status: dropped via commit-status, later solved via the Actions-runs API (v0.12.0)
 
@@ -719,6 +770,8 @@ there is no separate `conclusion`) and `get_workflow_run` (read), plus `dispatch
 Forgejo exposes no repo-level **logs or artifacts** endpoint, so the tools can report *that* a
 run failed and link to it, but can't retrieve the log text programmatically. (All of this is
 Forgejo-specific; v0.20 added Gitea, where the run shape and the available endpoints differ.)
+The logs half of that gap closed with Forgejo 16, which added per-job log and job-listing
+endpoints; `list_workflow_jobs` and `get_job_log` use them.
 
 ### Why the in-house client (dropping `forgejo-api`)
 
@@ -770,5 +823,7 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
 12. **v0.20.4** — reading commits, keys, branch protection and CI status: `list_commits`,
     `get_commit`, `list_keys`, `list_branch_protections`, `get_commit_statuses`,
     `get_combined_status`, `get_repo_tree`. *(done)*
-13. Later — issue/PR writes, sort filters on the issue lists, bounded Actions job logs (see
-    Non-goals), and slimming what still passes through raw.
+13. **v0.20.5** — Actions job logs: `list_workflow_jobs` and `get_job_log`, bounded by HTTP
+    `Range`. *(done)*
+14. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
+    through raw.

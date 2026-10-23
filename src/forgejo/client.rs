@@ -9,7 +9,7 @@
 //! Errors funnel through [`crate::mcp_core::ApiError`], re-exported here as [`ForgeError`] for the
 //! existing call sites.
 
-use crate::mcp_core::{RestClient, RestConfig, paging};
+use crate::mcp_core::{ByteRange, RestClient, RestConfig, paging};
 use serde_json::Value;
 use std::sync::OnceLock;
 use url::Url;
@@ -860,6 +860,51 @@ impl Forge {
     ) -> Result<Value, ForgeError> {
         self.rest
             .get(&format!("repos/{owner}/{repo}/actions/runs/{run_id}"), &[])
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` — the jobs of one run. Forgejo 16+.
+    ///
+    /// Same path on both flavors, different bodies: Forgejo answers with a bare array and no
+    /// paging, Gitea with a `{ jobs, total_count }` wrapper paged at its default size. Gitea is
+    /// asked for its usual 50-item ceiling so that a matrix run arrives in one answer; the tool
+    /// layer reports `total_count` when even that falls short.
+    pub async fn list_workflow_jobs(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<Value, ForgeError> {
+        let query = match self.flavor().await {
+            Flavor::Forgejo => Vec::new(),
+            Flavor::Gitea => paging(None, Some(50)),
+        };
+        self.rest
+            .get(
+                &format!("repos/{owner}/{repo}/actions/runs/{run_id}/jobs"),
+                &query,
+            )
+            .await
+    }
+
+    /// `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` — part of one job's log, by HTTP
+    /// `Range`. Same path on both flavors; plain text, one timestamped line per log line.
+    ///
+    /// Codeberg honours the range (`206` with `Content-Range`); a server that ignores it sends
+    /// the whole log, which [`ByteRange`] reports so the caller can cut the window itself.
+    pub async fn get_job_log(
+        &self,
+        owner: &str,
+        repo: &str,
+        job_id: i64,
+        range: &str,
+    ) -> Result<ByteRange, ForgeError> {
+        self.rest
+            .get_text_range(
+                &format!("repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                &[],
+                range,
+            )
             .await
     }
 

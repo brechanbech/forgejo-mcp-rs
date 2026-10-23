@@ -104,6 +104,7 @@ Where the two forges differ, and what the server does about it:
 | Unknown workflow filter | empty list | `404 workflow "x.yml" not found` | Surfaced as-is; the tool description says which is which |
 | `workflow_dispatch` reply | the created run (`return_run_info`) | `204 No Content` | Forgejo's run is passed through; on Gitea the tool returns an acknowledgement and tells the caller to find the run with `list_workflow_runs` |
 | Workflow directory | `.forgejo/workflows`, `.github/workflows` | `.gitea/workflows`, `.github/workflows` | Mentioned in the `dispatch_workflow` tool description |
+| Jobs of a run | bare array; no timestamps or steps | `{ jobs, total_count }`, with timestamps and steps | Unwrapped and normalized like runs; what Forgejo omits stays absent |
 
 Translating rather than sending both spellings is deliberate: an unknown query parameter is
 *ignored*, not rejected, so sending Forgejo's `ref` to Gitea would silently return **unfiltered**
@@ -232,6 +233,8 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
 | `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
 | `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
+| `list_workflow_jobs` | read | The jobs of one run, normalized on both forges; each job's `id` is what `get_job_log` takes. Forgejo 16+ |
+| `get_job_log` | read | Part of one job's log, fetched by HTTP `Range` — the last 32 KiB by default (`max_bytes` up to 1 MiB), cut to whole lines, colour codes and timestamps stripped. `earlier` / `later` give the next window to ask for. Forgejo 16+ |
 | `list_releases` | read | A repo's releases, newest first (auto-paginated, slimmed to identity + assets) |
 | `get_release` | read | One release by git **tag** — the lookup that makes a release script idempotent |
 | `list_release_assets` | read | A release's attached files (`id`, name, size, download URL) by `release_id` |

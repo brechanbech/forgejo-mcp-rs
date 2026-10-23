@@ -27,7 +27,7 @@ pub use helpers::{
     decode, gather_all, gathered_result, into_items, json_result, paged_result, to_mcp,
     tool_list_result,
 };
-pub use rest::{RestClient, RestConfig, paging};
+pub use rest::{ByteRange, RestClient, RestConfig, paging};
 pub use tokens::{TokenEnv, resolve_tokens};
 
 use tracing_subscriber::EnvFilter;
