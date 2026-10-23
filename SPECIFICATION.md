@@ -217,7 +217,9 @@ landed across v0.3–v0.11 and are listed in the README's current tool table rat
 | `rerun_workflow` | **done** | Write-mode, v0.20.7. Rerun a finished run, or with `job_id` one job and its dependents. Forgejo 17+; a missing endpoint is reported as such. |
 
 `list_workflow_runs` unwraps the endpoint's `{ workflow_runs, total_count }` body (no
-`X-Total-Count` header), so it does not auto-paginate. A `404` from these endpoints means the
+`X-Total-Count` header), so it does not auto-paginate. It always sends `page` and `limit`, defaulting to page 1 of 30, because Forgejo ignores
+`limit` here without `page` and returns every run; see
+[v0.20.7](#v0207--cancel-and-rerun-and-gitea-detection-fixed). A `404` from these endpoints means the
 repo has the Actions unit disabled, not that there are no runs. Verified end-to-end against a
 live dispatched run on Codeberg, then running Forgejo 15.
 
@@ -716,6 +718,32 @@ would be taken for Gitea; `FORGEJO_FLAVOR` pins it. The job-log verification of 
 under the wrong flavor. The paths it used are shared, and Forgejo's request for a job listing
 merely omits Gitea's `limit`, so its result stands. It did not test what it was believed to.
 
+**The run listing is always paged.** Forgejo honours `limit` on `…/actions/runs` only when
+`page` is sent too. Without `page` it returns every run the repository has, and `limit` is
+ignored. With `page` alone it pages at 30. Probed on Codeberg on 24 October 2026:
+
+| query | this repository (41 runs) | `forgejo/forgejo` (210,515 runs) |
+|---|---|---|
+| none, or `limit=3` | all 41 | `504` from the gateway after 30 s |
+| `page=1&limit=3` | 3 | 3 s for `limit=5` |
+| `page=2` | the oldest 11, after the newest 30 on page 1 | — |
+
+So until v0.20.7, `list_workflow_runs` could not list runs at all on a large Forgejo repository
+unless the caller passed `page`, and on a small one it returned everything regardless of
+`limit`. It now always sends both, defaulting to page 1 and a limit of 30, which is Forgejo's
+own page size. The reply echoes the values actually sent. `run_list_request` takes them as
+plain integers rather than options, so leaving one out no longer compiles. Releases, commits,
+issues, pulls, branches and tags were probed the same way and honour `limit` alone, so the
+shared `paging` helper is unchanged. Gitea honours `limit` alone here too, and sending `page`
+costs it nothing.
+
+**A run's trigger comes from `trigger_event`.** Testing the listing showed dispatched and
+scheduled runs with no `event` at all. Forgejo has two fields. `event` is empty for those runs:
+this repository's run 40, dispatched for the cancel test below, has `"event": ""` beside
+`"trigger_event": "workflow_dispatch"`, and a push run has both. `trigger_event` is also what
+Forgejo's `event` filter matches. The normalizer now reads `trigger_event` first and falls back
+to `event`, which is the only field Gitea has.
+
 **Verified live on Codeberg on 24 October 2026**, through the installed binary over MCP and in
 write mode. CI was dispatched on this repository (run 40, id 7968548) and cancelled at once;
 the answer showed `status: cancelled`, five seconds after it was created. Cancelling the same
@@ -894,7 +922,8 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     `get_combined_status`, `get_repo_tree`. *(done)*
 13. **v0.20.5** — Actions job logs: `list_workflow_jobs` and `get_job_log`, bounded by HTTP
     `Range`. *(done)*
-14. **v0.20.7** — `cancel_workflow_run` and `rerun_workflow`, and Gitea detection by the
-    compatibility marker alone. *(done; cancel verified live on Codeberg, rerun awaits Forgejo 17)*
+14. **v0.20.7** — `cancel_workflow_run` and `rerun_workflow`, Gitea detection by the
+    compatibility marker alone, and a run listing that is always paged. *(done; cancel verified
+    live on Codeberg, rerun awaits Forgejo 17)*
 15. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
     through raw.

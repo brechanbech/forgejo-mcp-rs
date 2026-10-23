@@ -30,6 +30,14 @@ records what changed, that one records why.
   filters, and `dispatch_workflow` sent a field Gitea refuses. Detection now
   relies on the `+gitea-` compatibility marker that Forgejo puts in its version
   string, and nothing else. `FORGEJO_FLAVOR` still overrides it.
+- `list_workflow_runs` on Forgejo ignored `limit` unless `page` was also
+  given, and returned every run. On a large repository that never completed:
+  `forgejo/forgejo`, with 210,515 runs, gets a `504` from Codeberg after 30
+  seconds. The tool now always sends `page` and `limit`, defaulting to page 1
+  of 30, and reports the values it sent.
+- Dispatched and scheduled Forgejo runs reported no `event`. Forgejo leaves
+  `event` empty for those runs and names the trigger in `trigger_event`, which
+  is now read first.
 
 ### Security
 - tokio 1.52.3 → 1.54.1, for RUSTSEC-2026-0386 (`AsyncFd::new` and related

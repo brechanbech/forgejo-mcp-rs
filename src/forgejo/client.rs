@@ -827,13 +827,14 @@ impl Forge {
     /// so the tool layer unwraps it like search rather than auto-paginating.
     ///
     /// The path and query depend on the flavor; [`run_list_request`] does that translation.
+    /// `page` and `limit` are not optional here, for the reason given there.
     pub async fn list_workflow_runs(
         &self,
         owner: &str,
         repo: &str,
         filters: &RunFilters,
-        page: Option<u32>,
-        limit: Option<u32>,
+        page: u32,
+        limit: u32,
     ) -> Result<Value, ForgeError> {
         let (path, query) =
             run_list_request(self.flavor().await, owner, repo, filters, page, limit);
@@ -983,15 +984,20 @@ fn rerun_path(flavor: Flavor, owner: &str, repo: &str, run_id: i64, job_id: Opti
 /// Sending Forgejo's spelling to Gitea would not error — unknown query parameters are simply
 /// ignored — it would silently return *unfiltered* results, which is why this translates
 /// rather than sending both spellings and hoping.
+///
+/// `page` and `limit` are always sent. Forgejo ignores `limit` on this endpoint unless `page` is
+/// given too, and without `page` it returns *every* run: all 41 of this repository's on Codeberg
+/// for `limit=3`, and for `forgejo/forgejo`, with 210,515 runs, a `504` from Codeberg's gateway
+/// after 30 seconds. Probed on 24 October 2026; no other listing tried behaves this way.
 fn run_list_request(
     flavor: Flavor,
     owner: &str,
     repo: &str,
     filters: &RunFilters,
-    page: Option<u32>,
-    limit: Option<u32>,
+    page: u32,
+    limit: u32,
 ) -> (String, Vec<(&'static str, String)>) {
-    let mut query = paging(page, limit);
+    let mut query = paging(Some(page), Some(limit));
     for (key, value) in [
         ("head_sha", &filters.head_sha),
         ("status", &filters.status),
@@ -1121,8 +1127,7 @@ mod tests {
 
     #[test]
     fn forgejo_filters_go_on_the_query_of_the_plain_runs_path() {
-        let (path, query) =
-            run_list_request(Flavor::Forgejo, "o", "r", &all_filters(), Some(2), Some(10));
+        let (path, query) = run_list_request(Flavor::Forgejo, "o", "r", &all_filters(), 2, 10);
         assert_eq!(path, "repos/o/r/actions/runs");
         assert_eq!(
             query,
@@ -1140,8 +1145,7 @@ mod tests {
 
     #[test]
     fn gitea_moves_the_workflow_into_the_path_and_renames_ref_to_branch() {
-        let (path, query) =
-            run_list_request(Flavor::Gitea, "o", "r", &all_filters(), Some(2), Some(10));
+        let (path, query) = run_list_request(Flavor::Gitea, "o", "r", &all_filters(), 2, 10);
         assert_eq!(path, "repos/o/r/actions/workflows/ci.yml/runs");
         assert_eq!(
             query,
@@ -1170,9 +1174,16 @@ mod tests {
             status: Some("failure".to_owned()),
             ..RunFilters::default()
         };
-        let (path, query) = run_list_request(Flavor::Gitea, "o", "r", &filters, None, None);
+        let (path, query) = run_list_request(Flavor::Gitea, "o", "r", &filters, 1, 30);
         assert_eq!(path, "repos/o/r/actions/runs");
-        assert_eq!(query, vec![("status", "failure".to_owned())]);
+        assert_eq!(
+            query,
+            vec![
+                ("page", "1".to_owned()),
+                ("limit", "30".to_owned()),
+                ("status", "failure".to_owned()),
+            ]
+        );
     }
 
     #[test]

@@ -2954,13 +2954,18 @@ pub struct ListWorkflowRunsParams {
     /// Filter by workflow file name, e.g. `ci.yml`.
     #[serde(default)]
     pub workflow_id: Option<String>,
-    /// 1-based page number.
+    /// 1-based page number. Defaults to 1, the most recent runs.
     #[serde(default)]
     pub page: Option<u32>,
-    /// Results per page.
+    /// Results per page. Defaults to 30; Codeberg caps it at 50.
     #[serde(default)]
     pub limit: Option<u32>,
 }
+
+/// Page size for `list_workflow_runs` when the caller gives none — what Forgejo itself uses once
+/// it is paging at all. Always sent, with a page, because Forgejo pages this listing only when
+/// asked to; see `run_list_request` in the client.
+const RUNS_DEFAULT_LIMIT: u32 = 30;
 
 /// A slimmed workflow run, in one shape regardless of which forge produced it.
 ///
@@ -2986,6 +2991,7 @@ struct RunSummary {
     /// distinction. Never present on Forgejo, which has no such field.
     #[serde(skip_serializing_if = "Option::is_none")]
     conclusion: Option<String>,
+    /// Forgejo's `trigger_event`, else `event` — Gitea has only the latter.
     #[serde(skip_serializing_if = "Option::is_none")]
     event: Option<String>,
     /// Workflow file name — Forgejo's `workflow_id`, or the basename of Gitea's `path`.
@@ -3092,7 +3098,9 @@ fn normalize_run(run: &Value) -> RunSummary {
         // the outcome.
         status: conclusion.clone().or_else(|| first_str(run, &["status"])),
         conclusion,
-        event: first_str(run, &["event"]),
+        // Forgejo leaves `event` empty for a dispatched or scheduled run and names the trigger
+        // only in `trigger_event`, which is also what its `event` filter matches.
+        event: first_str(run, &["trigger_event", "event"]),
         workflow: first_str(run, &["workflow_id"]).or(path_workflow),
         commit_sha: first_str(run, &["commit_sha", "head_sha"]),
         // `head_branch` is populated only for branch runs — it is null for tags and pull
@@ -3168,14 +3176,10 @@ pub async fn list_workflow_runs(
         event: params.event,
         workflow: params.workflow_id,
     };
+    let page = params.page.unwrap_or(1);
+    let limit = params.limit.unwrap_or(RUNS_DEFAULT_LIMIT);
     let body = forge
-        .list_workflow_runs(
-            &params.owner,
-            &params.repo,
-            &filters,
-            params.page,
-            params.limit,
-        )
+        .list_workflow_runs(&params.owner, &params.repo, &filters, page, limit)
         .await
         .map_err(to_mcp)?;
     let (items, total) = match body {
@@ -3187,7 +3191,7 @@ pub async fn list_workflow_runs(
         ),
         _ => (Vec::new(), None),
     };
-    paged_result(params.page, params.limit, total, &slim_runs(&items))
+    paged_result(Some(page), Some(limit), total, &slim_runs(&items))
 }
 
 /// Gets one workflow run by id (full object, not slimmed).
@@ -5189,6 +5193,19 @@ index cc10f213c2..d3bf724104 100644
         let s = normalize_run(&run);
         assert_eq!(s.created.as_deref(), Some("2026-10-23T14:43:54+02:00"));
         assert_eq!((s.started, s.stopped), (None, None));
+    }
+
+    #[test]
+    fn a_dispatched_forgejo_run_reports_its_trigger_event() {
+        // From Codeberg (this repository's run 40, dispatched): `event` is empty and only
+        // `trigger_event` names the trigger. A push run has both.
+        let run = serde_json::json!({ "id": 7_968_548, "event": "", "trigger_event": "workflow_dispatch" });
+        assert_eq!(
+            normalize_run(&run).event.as_deref(),
+            Some("workflow_dispatch")
+        );
+        let gitea = serde_json::json!({ "id": 1, "event": "push" });
+        assert_eq!(normalize_run(&gitea).event.as_deref(), Some("push"));
     }
 
     #[test]

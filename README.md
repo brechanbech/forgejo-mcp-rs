@@ -1,4 +1,4 @@
-# forgejo-mcp-rs
+ 30 to a page by default;# forgejo-mcp-rs
 
 [![CI](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions)
 
@@ -99,7 +99,7 @@ Where the two forges differ, and what the server does about it:
 | Run filter by git ref | `ref`, fully qualified | `branch`, bare name | Translated; `refs/heads/main` works on both |
 | Run filter by workflow | `workflow_id` query parameter | a separate `…/actions/workflows/{file}/runs` path | Translated |
 | Run outcome | `status` alone | `status` (phase) plus `conclusion` | Normalized: `conclusion` is promoted into `status`, and also kept verbatim |
-| Run field names | `commit_sha`, `prettyref`, `index_in_repo`, `title`, `created` | `head_sha`, `head_branch`, `run_number`, `display_title`, `created_at` | Normalized to one shape |
+| Run field names | `commit_sha`, `prettyref`, `index_in_repo`, `title`, `created`, `trigger_event` | `head_sha`, `head_branch`, `run_number`, `display_title`, `created_at`, `event` | Normalized to one shape |
 | Workflow file and ref | separate: `workflow_id` and `prettyref` | combined into `path`, as `ci.yml@refs/heads/main` | Split apart; the ref is shortened (`main`, `v0.16.0`) and a pull-request ref kept whole |
 | Unknown workflow filter | empty list | `404 workflow "x.yml" not found` | Surfaced as-is; the tool description says which is which |
 | `workflow_dispatch` reply | the created run (`return_run_info`) | `204 No Content` | Forgejo's run is passed through; on Gitea the tool returns an acknowledgement and tells the caller to find the run with `list_workflow_runs` |
