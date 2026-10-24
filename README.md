@@ -32,6 +32,9 @@ cargo build --release   # target/release/forgejo-mcp-rs
 cargo install --path .  # install to ~/.cargo/bin
 ```
 
+Runs on **macOS**, where it is developed and used daily, and **Linux**, where it builds and
+runs (Glama builds and inspects it on Debian). Windows is untested.
+
 ## Woodpecker CI
 
 A companion server for [Woodpecker CI](https://woodpecker-ci.org/) shipped in this crate as a
