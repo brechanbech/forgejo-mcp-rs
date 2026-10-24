@@ -1,4 +1,4 @@
- 30 to a page by default;# forgejo-mcp-rs
+# forgejo-mcp-rs
 
 [![CI](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/brechanbech/forgejo-mcp-rs/actions)
 
@@ -235,7 +235,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
 | `list_pull_request_files` | read | Files a PR changes (auto-paginated), with per-file additions/deletions and rename info. Forgejo omits the hunks here — use `get_pull_request_diff` for content |
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
-| `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
+| `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; newest first, 30 to a page by default; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
 | `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
 | `list_workflow_jobs` | read | The jobs of one run, normalized on both forges; each job's `id` is what `get_job_log` takes. Forgejo 16+ |
 | `get_job_log` | read | Part of one job's log, fetched by HTTP `Range` — the last 32 KiB by default (`max_bytes` up to 1 MiB), cut to whole lines, colour codes and timestamps stripped. `earlier` / `later` give the next window to ask for. Forgejo 16+ |
