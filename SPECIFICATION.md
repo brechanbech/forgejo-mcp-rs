@@ -862,6 +862,31 @@ pull requests here too, as issues with a `pull_request` object. On 24 October 20
 Half of the first 50 Codeberg returned were pull requests. `list_issues` now always sends
 `type=issues`; `list_pull_requests` is the tool for the rest.
 
+### v0.22.1 — tool annotations
+
+`tools/list` carried a name, a description and a schema for each tool, and nothing else. MCP
+tool annotations are how a client tells a read from a write without parsing prose, and each
+hint left out means the alarming answer: a tool without `readOnlyHint` may write, one without
+`destructiveHint` may destroy, one without `openWorldHint` reaches outside. So every one of the
+53 tools looked like a destructive open-world write. Directory graders such as Glama scored the
+descriptions as carrying "the full burden", and Anthropic's connector directory requires
+`readOnlyHint` or `destructiveHint` on every tool.
+
+Each `#[tool]` now sets a `title` and its hints:
+
+| Hint | Tools |
+|---|---|
+| `readOnlyHint: true` | The 32 reads from the forge, `list_push_mirrors` included although it needs write mode, plus `write_status` |
+| `destructiveHint: true` | What overwrites or removes: `edit_repo`, `edit_release`, `delete_repo`, `delete_push_mirror`, `delete_release_asset`, `sync_push_mirrors` (it overwrites the mirror's refs), `cancel_workflow_run`, `rerun_workflow` (it replaces the previous attempt) |
+| `destructiveHint: false` | The writes that only add: the `create_*` tools, `migrate_repo`, `comment_on_issue`, `add_push_mirror`, `upload_release_asset`, `dispatch_workflow`, and the two write-mode switches |
+| `idempotentHint: true` | The edits, the deletes, `sync_push_mirrors`, `cancel_workflow_run` (a second cancel was a no-op on Codeberg), and the write-mode switches |
+| `openWorldHint: false` | `write_status`, `enable_write_mode` and `disable_write_mode`, which touch only the server's own state |
+
+`tool_list_result` copies each `title` into `annotations.title`, where clients that predate
+the top-level field (before protocol `2025-06-18`) look for it. Two tests hold the line: one
+fails on a tool missing its title or any hint its kind needs, and one pins the destructive set,
+so a new tool has to decide where it belongs.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -1032,5 +1057,7 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     *(done; cancel verified live on Codeberg, rerun awaits Forgejo 17)*
 15. **v0.22.0** — issues slimmed like pull requests, and `list_issues` limited to issues.
     *(done)*
-16. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
+16. **v0.22.1** — every tool titled and annotated: read-only, destructive, idempotent and
+    open-world hints. *(done)*
+17. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
     through raw.

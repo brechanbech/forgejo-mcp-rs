@@ -8,7 +8,7 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
-## [Unreleased]
+## [0.22.1] — 2026-10-24
 
 ### Added
 - Every tool carries a `title` and MCP tool annotations. The 33 tools that only
