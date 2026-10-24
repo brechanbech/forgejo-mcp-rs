@@ -72,8 +72,18 @@ pub const TOOL_LIST_TTL_MS: u64 = 60 * 60 * 1000;
 /// `cacheScope` is [`CacheScope::Public`]: the tool set depends only on the binary, never on the
 /// caller or its token. Write-mode elevation gates the write tools at *call* time — it never
 /// hides them from the listing — so the list does not vary with elevation state either.
+///
+/// Each tool's `title` is also copied into `annotations.title`, where clients that predate the
+/// top-level field (protocol versions before `2025-06-18`) look for it.
 #[must_use]
-pub fn tool_list_result(tools: Vec<Tool>) -> ListToolsResult {
+pub fn tool_list_result(mut tools: Vec<Tool>) -> ListToolsResult {
+    for tool in &mut tools {
+        if let Some(annotations) = tool.annotations.as_mut()
+            && annotations.title.is_none()
+        {
+            annotations.title.clone_from(&tool.title);
+        }
+    }
     ListToolsResult {
         // rmcp clears this when the peer negotiated a pre-2026-07-28 version.
         result_type: Some(ResultType::COMPLETE),

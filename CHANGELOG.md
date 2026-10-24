@@ -8,6 +8,19 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [Unreleased]
+
+### Added
+- Every tool carries a `title` and MCP tool annotations. The 33 tools that only
+  read are `readOnlyHint: true`. The writes say whether they can overwrite or
+  remove something (`destructiveHint`: the edits, deletes, push-mirror sync,
+  cancel and rerun) and whether repeating them changes anything further
+  (`idempotentHint`). Everything that reaches the forge is `openWorldHint: true`;
+  the write-mode switches and `write_status` touch only the server's own state.
+  The title is repeated in `annotations.title` for clients that predate the
+  top-level field. Until now `tools/list` carried no annotations at all, so a
+  client had to take every tool for a destructive open-world write.
+
 ## [0.22.0] — 2026-10-24
 
 ### Changed
