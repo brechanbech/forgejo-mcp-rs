@@ -9,6 +9,7 @@ license = "MIT"
 repository = "https://codeberg.org/brechanbech/forgejo-mcp-rs"
 authors = ["Stefan Ractliffe"]
 readme = "README.md"
+exclude = ["glama.json"]
 keywords = ["mcp", "forgejo", "gitea", "codeberg", "ci"]
 categories = ["development-tools", "api-bindings"]
 
