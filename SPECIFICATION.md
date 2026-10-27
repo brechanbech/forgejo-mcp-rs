@@ -1300,6 +1300,115 @@ Write mode stays deliberate and time-boxed, but per forge: `enable_write_mode` t
 the forge and its URL ("write mode is on for ManCave, https://forge.mancave.lan/"), which is
 what the instance-naming rule was reaching for.
 
+### Toolsets
+
+A server lists every tool today: 59 of them, about 71 KB of listing (roughly 18,000 tokens),
+and twice that across the two servers. Directory reviews (Glama) call that too many, and some
+clients cap how many tools they will load across all their servers. Under forges, a server
+starts lean and takes on groups of tools as the work calls for them, and remembers what it was
+given.
+
+The groups are the ones the README already sorts the tools into:
+
+| Toolset | Tools |
+|---|---|
+| `account` | `whoami`, `version`, `list_orgs`, `list_notifications`, `list_keys` |
+| `repositories` | `list_my_repos`, `search_repos`, `get_repo`, `create_repo`, `edit_repo`, `delete_repo`, `migrate_repo` |
+| `files` | `get_repo_tree`, `get_file_contents`, `create_or_update_file`, `delete_file` |
+| `branches` | branches, protections and commits, with their statuses |
+| `issues` | the issue tools and comments |
+| `pull_requests` | the pull-request tools, reviews and merging |
+| `actions` | workflow runs, jobs, logs, dispatch, cancel and rerun |
+| `releases` | releases and their assets |
+| `push_mirrors` | the four push-mirror tools |
+
+#### Three layers
+
+- **The bare default** is `account` and `repositories`. `FORGE_TOOLSETS` in a server entry
+  replaces it, for anyone who wants a different floor
+  (`FORGE_TOOLSETS=account,repositories,issues`, or `all`). An unknown name refuses startup,
+  with the valid ones.
+- **The saved set** is what the server has taken on since: the bare default plus every set
+  enabled, minus every set disabled. It is kept per server (so per platform), in the user's home
+  directory, so it is per user and per machine: `~/.local/state/forgejo-mcp-rs/toolsets-forgejo`
+  and `…/toolsets-gitea`, or under `$XDG_STATE_HOME` when that is set.
+- **The live set** is what the server lists now. At startup it is the saved set if there is one,
+  otherwise the bare default.
+
+The saved set holds toolset names and nothing else, never a credential. It is the first thing
+this server writes to disk; the security model's "never written to a file" is about tokens, and
+stays true. The file is written atomically, and if two sessions change it at once the later
+write wins, which is harmless for a list of names. It is plain text, so it can also be read,
+edited or deleted by hand.
+
+#### Changing the set while the server runs
+
+Four tools, always listed whatever the set, alongside the write-mode switches and `list_forges`:
+
+| Tool | Does | Annotations |
+|---|---|---|
+| `list_toolsets` | every toolset, whether it is on, when it was added, and its tools | read-only, not open-world |
+| `enable_toolset` | switches a set on and saves it as part of the new default | not destructive, idempotent, not open-world |
+| `disable_toolset` | switches a set off and saves that | not destructive, idempotent, not open-world |
+| `reset_toolsets` | deletes the saved set and goes back to the bare default | not destructive, idempotent, not open-world |
+
+- **A model enables a set when a task needs it**, without asking first: a request about pull
+  requests on a server holding only the bare default is answered by `list_toolsets`, then
+  `enable_toolset("pull_requests")`, then the pull-request tools. No restart, no configuration
+  change.
+- **It tells the user.** `enable_toolset`'s reply carries a `note` the model is asked to relay,
+  as the write-mode notes are: which set came on, the tools it brought, and that it is now part
+  of the default for this server on this machine, with `reset_toolsets` as the way back
+  ("Toolset pull_requests (8 tools) is now on, and saved as part of the default for the Forgejo
+  server on this machine. reset_toolsets goes back to account and repositories."). The
+  instructions say the same, so the user is never surprised by a listing that has grown.
+- **No approval prompt, honestly annotated.** `enable_toolset` changes saved state, so it is not
+  marked read-only: that would be untrue, and a client trusting it would be misled about other
+  tools too. Whether a client asks before running it is the client's policy; in Claude Code an
+  allow rule for `enable_toolset` makes it run without asking.
+- **The listing changes, and the client is told.** The server declares
+  `capabilities.tools.listChanged` and sends `notifications/tools/list_changed` after every
+  change, so a client re-lists rather than waiting out the five-minute cache. Support varies by
+  client; Claude Code is the one to verify first. A client that ignores the notification still
+  learns what changed from the reply, and the router is the authority either way: a tool
+  switched off refuses a call even from a client still holding it, and one switched on accepts
+  a call by name.
+- **The saved set only grows unless something shrinks it.** Over months it drifts toward
+  everything, and so does its cost. `list_toolsets` shows when each set was added so the drift
+  is visible, and `reset_toolsets` is the remedy.
+- **Switching a set on grants nothing.** Its write tools still need a write token and write
+  mode for the forge they act on, exactly as before.
+
+#### What stays as it is
+
+- **Upgrading loses nothing.** The deprecated single-forge mode (no forges file, `FORGEJO_*`
+  variables) keeps listing every tool and saves no set. The lean start belongs to the forges
+  model, which a user opts into by writing a forges file.
+- **Annotations stay per tool.** Toolsets trim the list; they do not merge tools. Merging was
+  considered and set aside: `readOnlyHint` and `destructiveHint` describe a whole tool, so a
+  merged `issue(action: …)` would have to declare its most destructive action, and clients that
+  auto-approve reads would stop doing so; and a schema cannot say which parameters belong to
+  which action. The few clean merges (`get_commit_statuses` with `get_combined_status`, the two
+  write-mode switches) save about 1 KB.
+- **Descriptions are kept whole.** A set's tools come back with the same descriptions as when
+  everything is listed. Long ones such as `migrate_repo`'s and `list_workflow_runs`' record live
+  findings a caller needs at the moment of the call, so they are not trimmed to make the listing
+  smaller.
+- **Toolsets are per server, not per forge.** The listing is what the client sees, and one
+  server drives all its platform's forges through the same tools.
+
+#### Against GitHub's server
+
+GitHub's MCP server starts from a fixed `default` (`context`, `repos`, `issues`,
+`pull_requests`, `users`), takes `all` and additions such as `default,stargazers`, and offers
+include and exclude lists for single tools and a read-only switch. It had dynamic toolsets
+(`enable_toolset`, `list_available_toolsets`, `get_toolset_tools`) and removed them in v1.1.0,
+May 2026 (pull request #2512): they were local-only, never offered by its remote server, and
+carried a parallel registration path. Neither reason decides it here: this server is local and
+stdio-only, and has one registration path. Saving the set across restarts goes further than
+GitHub ever did, which is a reason to build it carefully, and to test it against Claude Code
+before anything else.
+
 ### Tokens
 
 Every token belongs to the forge that issued it. Two of them are only ever handed to another
@@ -1359,6 +1468,7 @@ forges ship; a 0.x minor bump allows it, as long as the CHANGELOG says so first.
 | `FORGEJO_MIGRATE_TOKEN` | the source forge's `export_token_env` |
 | `FORGEJO_MIRROR_TOKEN` | the target forge's `mirror_token_env` |
 | `FORGEJO_WRITE_MINUTES`, `FORGEJO_UPLOAD_ROOT`, `FORGEJO_UPLOAD_MAX_MB` | unchanged for now; per-server settings, not per-forge |
+| (every tool, always) | the bare default (`account`, `repositories`, or `FORGE_TOOLSETS`), widened as work needs and saved per server; the deprecated mode keeps every tool |
 
 ### In the code
 
@@ -1432,7 +1542,8 @@ forges ship; a 0.x minor bump allows it, as long as the CHANGELOG says so first.
     filters the forges silently drop refused instead. *(done)*
 21. **Forges** — named forges in a forges file, one server per platform driving all of that
     platform's forges, a `forge_shop` argument on every tool, write mode per forge,
-    `platform` in place of flavor, and credentials bound to the forge that issued them. See
-    [Proposed: forges](#proposed-forges). *(proposed; waiting for self-hosted instances to test
-    against)*
+    `platform` in place of flavor, credentials bound to the forge that issued them, and
+    toolsets: a lean start (`account`, `repositories`) widened as work needs it, saved per
+    server per machine, and resettable. See [Proposed: forges](#proposed-forges). *(proposed,
+    on the roadmap only; waiting for self-hosted instances to test against)*
 22. Later — label and milestone filters on `list_pull_requests`, which the forges take by id.
