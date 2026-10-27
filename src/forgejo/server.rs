@@ -233,11 +233,11 @@ impl ForgejoMcp {
     #[tool(
         title = "List issues",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List issues in a repository (owner/repo), open by default; optional state (open/closed/all) and page/limit. Issues only — pull requests, which the forges also serve as issues, are left out; use list_pull_requests for those. Each issue is slimmed to number, title, state, author, labels, assignees, milestone, comment count and dates, without its body; get_issue has the body."
+        description = "List issues in a repository (owner/repo), open by default; optional state (open/closed/all) and page/limit. Filters: labels and milestones (names; an issue with any of them matches), author, assignee, mentioned (logins), search (text), since/before (RFC 3339, by last update). A label or milestone name the forge does not know is refused rather than ignored, since the forge would then list every issue. sort orders the list (oldest, recentupdate, mostcomment, nearduedate, …) on Forgejo only: Gitea's issue listing has no sort, so there it is refused. Issues only — pull requests, which the forges also serve as issues, are left out; use list_pull_requests for those. Each issue is slimmed to number, title, state, author, labels, assignees, milestone, comment count and dates, without its body; get_issue has the body."
     )]
     async fn list_issues(
         &self,
-        Parameters(params): Parameters<tools::ListItemsParams>,
+        Parameters(params): Parameters<tools::ListIssuesParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::list_issues(&self.forgejo, params).await
     }
@@ -259,7 +259,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List pull requests",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List pull requests in a repository (owner/repo); optional state (open/closed/all), base and head branch, and page/limit. `head` is a bare branch name, or owner:branch to require the fork it comes from; with state=open it answers whether a branch already has an open pull request. Every answer is checked against base and head, because a forge that lacks a filter ignores it: Gitea has no head filter, and Forgejo had neither before 16. On those the whole list is walked and filtered here (capped at 1000), so page/limit no longer apply. Each pull request is slimmed to number, title, state, merged, draft, mergeable, base, head, head_repo (only for a fork), head_sha, author, labels and dates; get_pull_request has the description and review detail."
+        description = "List pull requests in a repository (owner/repo); optional state (open/closed/all), base and head branch, author (login), sort (oldest, recentupdate, recentclose, mostcomment, …; newest first by default), and page/limit. `head` is a bare branch name, or owner:branch to require the fork it comes from; with state=open it answers whether a branch already has an open pull request. Every answer is checked against base and head, because a forge that lacks a filter ignores it: Gitea has no head filter, and Forgejo had neither before 16. On those the whole list is walked and filtered here (capped at 1000), so page/limit no longer apply. Each pull request is slimmed to number, title, state, merged, draft, mergeable, base, head, head_repo (only for a fork), head_sha, author, labels and dates; get_pull_request has the description and review detail."
     )]
     async fn list_pull_requests(
         &self,

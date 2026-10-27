@@ -57,13 +57,14 @@ pub fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> 
     Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
-/// Freshness hint advertised on `tools/list`: one hour.
+/// Freshness hint advertised on `tools/list`: five minutes.
 ///
 /// The server registers its tool set once, at construction, and never mutates it, so the list
-/// is constant for the life of the process. An hour is long enough to stop a client re-listing
-/// on every turn, short enough that a client persisting the cache across restarts picks up an
-/// upgraded binary promptly.
-pub const TOOL_LIST_TTL_MS: u64 = 60 * 60 * 1000;
+/// is constant for the life of the process. But a client may keep the list across a restart:
+/// on 27 October 2026, after an upgrade and a reconnect, Claude Code still offered two tools
+/// without their new parameters, under the hour this used to be. Five minutes still spares a
+/// client re-listing on every turn, and bounds how long an upgrade goes unseen.
+pub const TOOL_LIST_TTL_MS: u64 = 5 * 60 * 1000;
 
 /// Wraps a router's tools in a [`ListToolsResult`] carrying the SEP-2549 cache hints (`ttlMs`,
 /// `cacheScope`) that protocol version `2026-07-28` requires. Servers override `list_tools` with

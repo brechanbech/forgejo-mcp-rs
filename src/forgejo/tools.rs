@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::client::{
-    Flavor, Forge, ForgeError, PullFilters, PullMerge, RunFilters, encode_repo_path,
+    Flavor, Forge, ForgeError, IssueFilters, PullFilters, PullMerge, RunFilters, encode_repo_path,
 };
 
 /// Returns the authenticated user — proof the token works.
@@ -119,9 +119,9 @@ pub struct FileContentsParams {
     pub end_line: Option<u32>,
 }
 
-/// Parameters for listing issues or pull requests in a repository.
+/// Parameters for the `list_issues` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct ListItemsParams {
+pub struct ListIssuesParams {
     /// Repository owner — user or organization, e.g. `brechanbech`.
     pub owner: String,
     /// Repository name, e.g. `forgejo-mcp-rs`.
@@ -129,6 +129,36 @@ pub struct ListItemsParams {
     /// Filter by state: `open` (default), `closed`, or `all`.
     #[serde(default)]
     pub state: Option<String>,
+    /// Order: `latest` (the default, newest first), `oldest`, `recentupdate`, `leastupdate`,
+    /// `mostcomment`, `leastcomment`, `nearduedate`, `farduedate`, or `relevance` (with
+    /// `search`). Forgejo only: Gitea's issue listing has no sort, so anything but `latest` is
+    /// refused there.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Only issues carrying any of these label names.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+    /// Only issues in any of these milestones, by name (or id).
+    #[serde(default)]
+    pub milestones: Option<Vec<String>>,
+    /// Only issues opened by this login.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Only issues assigned to this login.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// Only issues mentioning this login.
+    #[serde(default)]
+    pub mentioned: Option<String>,
+    /// Only issues matching this text.
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Only issues updated at or after this time (RFC 3339, e.g. `2026-10-01T00:00:00Z`).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Only issues updated before this time (RFC 3339).
+    #[serde(default)]
+    pub before: Option<String>,
     /// 1-based page number.
     #[serde(default)]
     pub page: Option<u32>,
@@ -1279,18 +1309,152 @@ fn issue_detail(issue: &Value) -> IssueDetail {
     }
 }
 
+/// The issue sort orders, in Forgejo's spelling. `latest` is the default and is not sent.
+///
+/// Both forges ignore a sort value they do not know and list newest first, so a misspelt one
+/// would look like it worked. Probed on Codeberg and gitea.com, 27 October 2026.
+const ISSUE_SORTS: [&str; 9] = [
+    "latest",
+    "oldest",
+    "recentupdate",
+    "leastupdate",
+    "mostcomment",
+    "leastcomment",
+    "nearduedate",
+    "farduedate",
+    "relevance",
+];
+
+/// The pull-request sort orders, spelled alike on both forges. `latest` is ours, for the
+/// default newest-first order, so that both listings share one word for it; it is not sent.
+const PULL_SORTS: [&str; 8] = [
+    "latest",
+    "oldest",
+    "recentupdate",
+    "recentclose",
+    "leastupdate",
+    "mostcomment",
+    "leastcomment",
+    "priority",
+];
+
+/// Checks a sort order against the ones a listing takes, and drops `latest`, the default.
+fn sort_param<'a>(sort: Option<&'a str>, allowed: &[&str]) -> Result<Option<&'a str>, McpError> {
+    match sort {
+        None | Some("latest") => Ok(None),
+        Some(s) if allowed.contains(&s) => Ok(Some(s)),
+        Some(s) => Err(McpError::invalid_params(
+            format!(
+                "unknown sort \"{s}\": expected one of {}. The forge would ignore it and list \
+                 newest first",
+                allowed.join(", ")
+            ),
+            None,
+        )),
+    }
+}
+
+/// Whether an issue answers the label and milestone filters asked for: any of the labels, and
+/// any of the milestones, by name or id. Names compare case-insensitively.
+fn issue_matches(issue: &Value, labels: &[String], milestones: &[String]) -> bool {
+    let labels_ok = labels.is_empty()
+        || issue
+            .get("labels")
+            .and_then(Value::as_array)
+            .is_some_and(|have| {
+                have.iter()
+                    .filter_map(|l| l.get("name").and_then(Value::as_str))
+                    .any(|name| labels.iter().any(|want| want.eq_ignore_ascii_case(name)))
+            });
+    let milestones_ok = milestones.is_empty()
+        || issue.get("milestone").is_some_and(|m| {
+            let title = m.get("title").and_then(Value::as_str);
+            let id = m.get("id").and_then(Value::as_i64).map(|id| id.to_string());
+            milestones.iter().any(|want| {
+                title.is_some_and(|t| want.eq_ignore_ascii_case(t)) || id.as_deref() == Some(want)
+            })
+        });
+    labels_ok && milestones_ok
+}
+
+/// Refuses a listing in which the forge dropped a label or milestone filter.
+///
+/// Both forges discard a label or milestone name they do not know, and with none of them known
+/// drop the filter altogether and list everything, so a typo would come back as every issue in
+/// the repository. Probed on Codeberg and gitea.com, 27 October 2026. An issue that answers
+/// neither filter shows the forge did that.
+fn check_issue_filters(
+    items: &[Value],
+    labels: &[String],
+    milestones: &[String],
+) -> Result<(), McpError> {
+    let Some(stray) = items
+        .iter()
+        .find(|issue| !issue_matches(issue, labels, milestones))
+    else {
+        return Ok(());
+    };
+    let (what, names) = if issue_matches(stray, labels, &[]) {
+        ("milestones", milestones)
+    } else {
+        ("labels", labels)
+    };
+    Err(McpError::invalid_params(
+        format!(
+            "no {what} named {} in this repository: the forge drops names it does not know, \
+             and with none known it would have listed every issue. Check the spelling against \
+             get_issue's {what}",
+            names.join(", ")
+        ),
+        None,
+    ))
+}
+
 /// Lists issues in `owner/repo` (open issues by default).
 pub async fn list_issues(
     forge: &Forge,
-    params: ListItemsParams,
+    params: ListIssuesParams,
 ) -> Result<CallToolResult, McpError> {
     let state = Some(state_or_open(params.state.as_deref())?);
+    let sort = sort_param(params.sort.as_deref(), &ISSUE_SORTS)?;
+    if let Some(sort) = sort
+        && forge.flavor().await == Flavor::Gitea
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "sort \"{sort}\" refused: Gitea's issue listing has no sort and always lists \
+                 newest first, so it would be ignored. Omit sort, or order the results yourself"
+            ),
+            None,
+        ));
+    }
+    let labels = params.labels.unwrap_or_default();
+    let milestones = params.milestones.unwrap_or_default();
+    let filters = IssueFilters {
+        state,
+        sort,
+        labels: &labels,
+        milestones: &milestones,
+        created_by: params.author.as_deref(),
+        assigned_by: params.assignee.as_deref(),
+        mentioned_by: params.mentioned.as_deref(),
+        q: params.search.as_deref(),
+        since: params.since.as_deref(),
+        before: params.before.as_deref(),
+    };
     if params.page.is_none() && params.limit.is_none() {
         let all = gather_all(|page, limit| {
-            Box::pin(forge.list_issues(&params.owner, &params.repo, state, Some(page), Some(limit)))
+            Box::pin(forge.list_issues(
+                &params.owner,
+                &params.repo,
+                &filters,
+                Some(page),
+                Some(limit),
+            ))
         })
         .await
         .map_err(to_mcp)?;
+        check_issue_filters(&all.items, &labels, &milestones)?;
         let items: Vec<IssueSummary> = all.items.iter().map(slim_issue).collect();
         return gathered_result(&items, all.total, all.truncated);
     }
@@ -1298,13 +1462,15 @@ pub async fn list_issues(
         .list_issues(
             &params.owner,
             &params.repo,
-            state,
+            &filters,
             params.page,
             params.limit,
         )
         .await
         .map_err(to_mcp)?;
-    let items: Vec<IssueSummary> = into_items(issues).iter().map(slim_issue).collect();
+    let issues = into_items(issues);
+    check_issue_filters(&issues, &labels, &milestones)?;
+    let items: Vec<IssueSummary> = issues.iter().map(slim_issue).collect();
     paged_result(params.page, params.limit, total, &items)
 }
 
@@ -1334,6 +1500,13 @@ pub struct ListPullRequestsParams {
     /// `fix/login`, or `owner:branch` to require the fork it comes from.
     #[serde(default)]
     pub head: Option<String>,
+    /// Order: `latest` (the default, newest first), `oldest`, `recentupdate`, `recentclose`,
+    /// `leastupdate`, `mostcomment`, `leastcomment` or `priority`.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Only pull requests opened by this login.
+    #[serde(default)]
+    pub author: Option<String>,
     /// 1-based page number.
     #[serde(default)]
     pub page: Option<u32>,
@@ -1556,12 +1729,24 @@ pub async fn list_pull_requests(
     let state = Some(state_or_open(params.state.as_deref())?);
     let head = params.head.as_deref().map(HeadFilter::parse).transpose()?;
     let base = params.base.as_deref();
+    let author = params.author.as_deref();
     let filters = PullFilters {
         state,
         base,
         head: head.map(|h| h.branch),
+        sort: sort_param(params.sort.as_deref(), &PULL_SORTS)?,
+        poster: author,
     };
-    let matches = |pr: &Value| pull_matches(pr, base, head.as_ref());
+    // Both forges filter by author (confirmed on Codeberg and gitea.com), but it is checked
+    // like the branch filters, so a forge that ignored it is walked rather than believed.
+    let matches = |pr: &Value| {
+        pull_matches(pr, base, head.as_ref())
+            && author.is_none_or(|a| {
+                pr.pointer("/user/login")
+                    .and_then(Value::as_str)
+                    .is_some_and(|login| login.eq_ignore_ascii_case(a))
+            })
+    };
 
     let paged = params.page.is_some() || params.limit.is_some();
     let gitea_head = head.is_some() && forge.flavor().await == Flavor::Gitea;
@@ -5435,6 +5620,73 @@ mod tests {
             migrate_repo_body(migrate_params("https://example.com/o/r.git"), Some("tok")).unwrap();
         assert!(body.get("auth_token").is_none(), "public source: no token");
         assert!(body.get("auth_username").is_none());
+    }
+
+    #[test]
+    fn a_sort_is_checked_and_latest_is_not_sent() {
+        assert_eq!(sort_param(None, &ISSUE_SORTS).unwrap(), None);
+        assert_eq!(sort_param(Some("latest"), &PULL_SORTS).unwrap(), None);
+        assert_eq!(
+            sort_param(Some("oldest"), &ISSUE_SORTS).unwrap(),
+            Some("oldest")
+        );
+        // Each listing takes its own: the issue listing has no recentclose, the pull listing
+        // no due dates.
+        assert!(sort_param(Some("recentclose"), &ISSUE_SORTS).is_err());
+        assert!(sort_param(Some("nearduedate"), &PULL_SORTS).is_err());
+        // The forges would ignore it and list newest first.
+        let err = sort_param(Some("newest"), &ISSUE_SORTS).unwrap_err();
+        assert!(err.message.contains("unknown sort"), "{}", err.message);
+    }
+
+    #[test]
+    fn an_issue_matches_any_label_and_milestone_asked_for() {
+        let issue = serde_json::json!({
+            "labels": [{ "name": "Kind/Bug" }, { "name": "priority" }],
+            "milestone": { "id": 7, "title": "v0.26" }
+        });
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(issue_matches(&issue, &[], &[]));
+        assert!(issue_matches(&issue, &names(&["kind/bug", "x"]), &[]));
+        assert!(issue_matches(&issue, &[], &names(&["V0.26"])));
+        assert!(issue_matches(&issue, &[], &names(&["7"])));
+        assert!(!issue_matches(&issue, &names(&["docs"]), &[]));
+        assert!(!issue_matches(&issue, &[], &names(&["v1.0"])));
+        assert!(!issue_matches(
+            &serde_json::json!({ "milestone": null }),
+            &[],
+            &names(&["7"])
+        ));
+    }
+
+    #[test]
+    fn a_dropped_label_filter_is_refused_not_returned() {
+        // What both forges answered labels=no-such-label with: every issue, filter dropped.
+        let items = vec![
+            serde_json::json!({ "number": 1, "labels": [{ "name": "bug" }] }),
+            serde_json::json!({ "number": 2, "labels": [] }),
+        ];
+        let labels = vec!["no-such-label".to_owned()];
+        let err = check_issue_filters(&items, &labels, &[]).unwrap_err();
+        assert!(
+            err.message.contains("no labels named no-such-label"),
+            "{}",
+            err.message
+        );
+
+        // A milestone dropped the same way is named as a milestone.
+        let milestones = vec!["v9".to_owned()];
+        let err = check_issue_filters(&items, &[], &milestones).unwrap_err();
+        assert!(
+            err.message.contains("no milestones named v9"),
+            "{}",
+            err.message
+        );
+
+        // An answer that honoured the filter passes, and so does an empty one.
+        let bug = vec!["bug".to_owned()];
+        assert!(check_issue_filters(&items[..1], &bug, &[]).is_ok());
+        assert!(check_issue_filters(&[], &labels, &[]).is_ok());
     }
 
     #[test]

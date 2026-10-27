@@ -425,15 +425,11 @@ impl Forge {
         &self,
         owner: &str,
         repo: &str,
-        state: Option<&str>,
+        filters: &IssueFilters<'_>,
         page: Option<u32>,
         limit: Option<u32>,
     ) -> Result<(Value, Option<usize>), ForgeError> {
-        let mut query = paging(page, limit);
-        if let Some(state) = state {
-            query.push(("state", state.to_owned()));
-        }
-        query.push(("type", "issues".to_owned()));
+        let query = issue_list_query(filters, page, limit);
         self.rest
             .get_list(&format!("repos/{owner}/{repo}/issues"), &query)
             .await
@@ -1124,6 +1120,68 @@ pub struct PullFilters<'a> {
     /// Head (source) branch name, bare. Forgejo matches it against the head's `label`, which is
     /// the branch name for an ordinary pull request and `user/topic` for an agit-flow one.
     pub head: Option<&'a str>,
+    /// Sort order, in the forges' own spelling (`oldest`, `recentupdate`, …). Absent means
+    /// newest first.
+    pub sort: Option<&'a str>,
+    /// Author login: the forges call it `poster`.
+    pub poster: Option<&'a str>,
+}
+
+/// Filters for an issue listing, in the query names both forges share.
+#[derive(Debug, Default)]
+pub struct IssueFilters<'a> {
+    /// `open`, `closed` or `all`.
+    pub state: Option<&'a str>,
+    /// Sort order (`oldest`, `recentupdate`, …). Forgejo only: Gitea's issue listing ignores it.
+    pub sort: Option<&'a str>,
+    /// Label names; an issue with any of them matches.
+    pub labels: &'a [String],
+    /// Milestone names or ids; an issue in any of them matches.
+    pub milestones: &'a [String],
+    /// Author login.
+    pub created_by: Option<&'a str>,
+    /// Assignee login.
+    pub assigned_by: Option<&'a str>,
+    /// Login mentioned in the issue.
+    pub mentioned_by: Option<&'a str>,
+    /// Search text.
+    pub q: Option<&'a str>,
+    /// Only issues updated at or after this RFC 3339 time.
+    pub since: Option<&'a str>,
+    /// Only issues updated before this RFC 3339 time.
+    pub before: Option<&'a str>,
+}
+
+/// Builds an issue listing's query. Always `type=issues`: without it both forges list pull
+/// requests here too.
+fn issue_list_query(
+    filters: &IssueFilters<'_>,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Vec<(&'static str, String)> {
+    let mut query = paging(page, limit);
+    query.push(("type", "issues".to_owned()));
+    for (key, value) in [
+        ("state", filters.state),
+        ("sort", filters.sort),
+        ("created_by", filters.created_by),
+        ("assigned_by", filters.assigned_by),
+        ("mentioned_by", filters.mentioned_by),
+        ("q", filters.q),
+        ("since", filters.since),
+        ("before", filters.before),
+    ] {
+        if let Some(value) = value {
+            query.push((key, value.to_owned()));
+        }
+    }
+    if !filters.labels.is_empty() {
+        query.push(("labels", filters.labels.join(",")));
+    }
+    if !filters.milestones.is_empty() {
+        query.push(("milestones", filters.milestones.join(",")));
+    }
+    query
 }
 
 /// How to merge a pull request, before it is spelled the way this instance's flavor expects.
@@ -1246,6 +1304,12 @@ fn pull_list_query(
     }
     if let (Flavor::Forgejo, Some(head)) = (flavor, filters.head) {
         query.push(("head", head.to_owned()));
+    }
+    if let Some(sort) = filters.sort {
+        query.push(("sort", sort.to_owned()));
+    }
+    if let Some(poster) = filters.poster {
+        query.push(("poster", poster.to_owned()));
     }
     query
 }
@@ -1569,6 +1633,8 @@ mod tests {
             state: Some("open"),
             base: Some("main"),
             head: Some("feature"),
+            sort: None,
+            poster: None,
         };
         assert_eq!(
             pull_list_query(Flavor::Forgejo, &filters, None, None),
@@ -1587,6 +1653,50 @@ mod tests {
                 ("limit", "50".to_owned()),
                 ("state", "open".to_owned()),
                 ("base_branch", "main".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pull_sort_and_author_are_spelled_alike_on_both_flavors() {
+        let filters = PullFilters {
+            state: None,
+            base: None,
+            head: None,
+            sort: Some("oldest"),
+            poster: Some("brechanbech"),
+        };
+        for flavor in [Flavor::Forgejo, Flavor::Gitea] {
+            assert_eq!(
+                pull_list_query(flavor, &filters, None, None),
+                vec![
+                    ("sort", "oldest".to_owned()),
+                    ("poster", "brechanbech".to_owned()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn issue_filters_send_only_what_was_given() {
+        let labels = vec!["bug".to_owned(), "kind/breaking".to_owned()];
+        let filters = IssueFilters {
+            state: Some("all"),
+            sort: Some("oldest"),
+            labels: &labels,
+            created_by: Some("brechanbech"),
+            ..IssueFilters::default()
+        };
+        assert_eq!(
+            issue_list_query(&filters, Some(2), Some(10)),
+            vec![
+                ("page", "2".to_owned()),
+                ("limit", "10".to_owned()),
+                ("type", "issues".to_owned()),
+                ("state", "all".to_owned()),
+                ("sort", "oldest".to_owned()),
+                ("created_by", "brechanbech".to_owned()),
+                ("labels", "bug,kind/breaking".to_owned()),
             ]
         );
     }

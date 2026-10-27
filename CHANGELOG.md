@@ -8,6 +8,21 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.26.0] — 2026-10-27
+
+### Added
+- `list_issues` takes `sort`, `labels`, `milestones`, `author`, `assignee`, `mentioned`,
+  `search`, `since` and `before`. `sort` works on Forgejo; Gitea's issue listing has no sort,
+  and anything but `latest` is refused there rather than silently ignored.
+- `list_pull_requests` takes `sort` and `author`, on both forges.
+- Both forges answer an unknown label or milestone name by dropping the filter and listing
+  every issue, and ignore an unknown sort value. Those cases are refused, with the names,
+  instead of being passed through.
+
+### Changed
+- `tools/list` advertises a five-minute `ttlMs`, down from an hour. A client was seen offering
+  a cached tool list from before an upgrade, without the new parameters.
+
 ## [0.25.0] — 2026-10-27
 
 ### Changed

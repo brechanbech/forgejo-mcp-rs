@@ -179,7 +179,9 @@ slimmed the same way.
 
 **Limitations (planned refinements):** sort order and the other query filters (labels,
 milestones, author, …) aren't exposed yet, and the per-item output of the passthrough list
-tools is the full API object, not a slimmed summary.
+tools is the full API object, not a slimmed summary. *(Both since done: slimming through
+v0.22.0, sort and filters in
+[v0.26.0](#v0260--sort-and-filters-on-the-issue-and-pull-request-lists).)*
 
 ### v0.2 — write mode & repo management
 
@@ -286,10 +288,11 @@ No tool changes; the tool surface is identical to v0.15. What moved:
 | `server_info` set explicitly | `Implementation::from_build_env` expands `env!` inside *rmcp*, so the server was identifying itself as `rmcp 3.0.0`. Now `forgejo-mcp-rs` at the crate version. |
 | `base64 0.22` → `0.23` | Matches rmcp's. Does **not** clear the `cargo deny` duplicate warning: `reqwest`/`hyper-util` still pin 0.22, so two versions remain in the tree until they update. |
 
-**Cache hints.** `ttlMs` is one hour and `cacheScope` is `public`. Public is safe because the
-tool set depends only on the binary, never on the caller or its token: write-mode elevation
-gates the write tools at *call* time and never hides them from the listing, so the list does
-not vary with elevation state either. Both fields are sent unconditionally rather than gated on
+**Cache hints.** `ttlMs` is five minutes (an hour until v0.26.0, when a client was seen
+offering a cached tool list from before an upgrade) and `cacheScope` is `public`. Public is safe
+because the tool set depends only on the binary, never on the caller or its token: write-mode
+elevation gates the write tools at *call* time and never hides them from the listing, so the
+list does not vary with elevation state either. Both fields are sent unconditionally rather than gated on
 the negotiated version — they are additive, and rmcp models them as optional across versions,
 so a pre-2026-07-28 client simply ignores them.
 
@@ -1022,6 +1025,42 @@ empty, which names a migrated repository's source.
 `add_push_mirror` and `list_push_mirrors` still pass through Forgejo's push-mirror object. It is
 about ten fields and carries no credential, so there is nothing to cut.
 
+### v0.26.0 — sort and filters on the issue and pull-request lists
+
+`list_issues` gains `sort`, `labels`, `milestones`, `author`, `assignee`, `mentioned`, `search`,
+`since` and `before`; `list_pull_requests` gains `sort` and `author`. The query names are the
+forges' own (`created_by`, `assigned_by`, `mentioned_by`, `q`, `poster`), given the names the
+rest of this server uses.
+
+What the two forges do with them, probed on Codeberg (`forgejo/forgejo`) and gitea.com
+(`gitea/tea`) on 27 October 2026:
+
+| | Codeberg | gitea.com |
+|---|---|---|
+| `sort` on issues | honoured | **ignored**, every value: always newest first |
+| `sort` on pull requests | honoured | honoured |
+| an unknown `sort` value | ignored, newest first | ignored, newest first |
+| an unknown label name | **filter dropped: every issue listed** | the same |
+| one known and one unknown label | the known one applied | the same |
+| an unknown milestone name | **filter dropped** | the same |
+| an unknown author (`created_by`, `poster`) | 400 | 404 "user does not exist" |
+
+Each silent case is turned into a refusal:
+
+- **`sort` is checked against the listing's own values** (the issue listing has due dates and
+  `relevance`, the pull listing `recentclose` and `priority`). `latest`, the default newest-first
+  order, is accepted on both and not sent. Gitea has no issue sort anywhere, its issue search
+  included, so any other value is refused there.
+- **A label or milestone filter is checked against the answer.** An issue that carries none of
+  the requested labels, or is in none of the requested milestones, can only be there because the
+  forge dropped the filter; the call is refused with the names, rather than returning the whole
+  repository's issues as if they matched. A name dropped alongside a known one cannot be seen
+  this way, and goes unreported.
+- **The pull-request author is checked like the branch filters**, so a forge that ignored it
+  would be walked and filtered here rather than believed. Both honour it today.
+
+Pull-request labels and milestones are left out: both forges take them as ids there, not names.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -1389,9 +1428,11 @@ forges ship; a 0.x minor bump allows it, as long as the CHANGELOG says so first.
     *(done; verified live gitea.com → Codeberg)*
 19. **v0.25.0** — `get_workflow_run`, the repository writes and `create_branch` answer in
     their read tools' shapes. *(done)*
-20. **Forges** — named forges in a forges file, one server per platform driving all of that
+20. **v0.26.0** — sort and filters on `list_issues` and `list_pull_requests`, with the
+    filters the forges silently drop refused instead. *(done)*
+21. **Forges** — named forges in a forges file, one server per platform driving all of that
     platform's forges, a `forge_shop` argument on every tool, write mode per forge,
     `platform` in place of flavor, and credentials bound to the forge that issued them. See
     [Proposed: forges](#proposed-forges). *(proposed; waiting for self-hosted instances to test
     against)*
-21. Later — sort filters on the issue lists.
+22. Later — label and milestone filters on `list_pull_requests`, which the forges take by id.
