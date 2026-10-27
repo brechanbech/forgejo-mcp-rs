@@ -267,8 +267,21 @@ pub async fn get_repo(forge: &Forge, params: RepoRef) -> Result<CallToolResult, 
         .get_repo(&params.owner, &params.repo)
         .await
         .map_err(to_mcp)?;
-    let detail: RepoDetail = decode(repo)?;
-    json_result(&detail)
+    repo_detail_result(repo)
+}
+
+/// Answers with a raw repository object in [`RepoDetail`]'s shape. `create_repo`, `edit_repo`
+/// and `migrate_repo` get the same object back as `get_repo` does, owner profile (email
+/// included), merge settings and wiki URLs and all, and answer with what `get_repo` would.
+fn repo_detail_result(raw: Value) -> Result<CallToolResult, McpError> {
+    json_result(&repo_detail(raw)?)
+}
+
+fn repo_detail(raw: Value) -> Result<RepoDetail, McpError> {
+    let mut detail: RepoDetail = decode(raw)?;
+    // Every repository carries `original_url`; it is empty unless the repo was migrated.
+    detail.original_url = detail.original_url.filter(|u| !u.is_empty());
+    Ok(detail)
 }
 
 /// One repository in detail: the list summary plus the unit toggles.
@@ -284,6 +297,15 @@ pub async fn get_repo(forge: &Forge, params: RepoRef) -> Result<CallToolResult, 
 struct RepoDetail {
     #[serde(flatten)]
     summary: RepoSummary,
+    /// True until the first commit: how a fresh `create_repo` differs from a migrated or
+    /// pushed-to one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    empty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mirror: Option<bool>,
+    /// Where a migrated repository was copied from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     has_issues: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2324,7 +2346,7 @@ pub async fn create_repo(
         .create_repo(&Value::Object(body))
         .await
         .map_err(to_mcp)?;
-    json_result(&repo)
+    repo_detail_result(repo)
 }
 
 /// The `PATCH` body for `edit_repo`: exactly the fields the caller set, nothing else.
@@ -2367,7 +2389,7 @@ pub async fn edit_repo(forge: &Forge, params: EditRepoParams) -> Result<CallTool
         .edit_repo(&owner, &repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
-    json_result(&updated)
+    repo_detail_result(updated)
 }
 
 /// Deletes a repository — guarded by an exact `owner/repo` confirmation.
@@ -2565,8 +2587,7 @@ pub async fn migrate_repo(
         Err(e) => return Err(to_mcp(e)),
     }
     match forge.migrate_repo(&Value::Object(body)).await {
-        // The Repository response carries no credential, so it is safe to return verbatim.
-        Ok(repo) => json_result(&repo),
+        Ok(repo) => repo_detail_result(repo),
         Err(e) => {
             let left_behind = forge.get_repo(&owner, &name).await.is_ok();
             Err(migrate_failure(
@@ -2675,7 +2696,9 @@ pub async fn create_branch(
         .create_branch(&params.owner, &params.repo, &Value::Object(body))
         .await
         .map_err(to_mcp)?;
-    json_result(&branch)
+    // The forge answers with the branch and its whole head commit (author, committer,
+    // verification); `list_branches`' shape is name, head SHA and protection.
+    json_result(&slim_branches(vec![branch]).pop())
 }
 
 /// Parameters for the `create_pull_request` tool.
@@ -4222,13 +4245,16 @@ pub async fn list_workflow_runs(
     paged_result(Some(page), Some(limit), total, &slim_runs(&items))
 }
 
-/// Gets one workflow run by id (full object, not slimmed).
+/// Gets one workflow run by id, in `list_workflow_runs`' shape.
+///
+/// The raw run was about 20 KB on Codeberg (27 October 2026): the whole push `event_payload`
+/// (as an escaped string), the repository twice, and `trigger_user` with its email address.
 pub async fn get_workflow_run(forge: &Forge, params: RunRef) -> Result<CallToolResult, McpError> {
     let run = forge
         .get_workflow_run(&params.owner, &params.repo, params.run_id)
         .await
         .map_err(to_mcp)?;
-    json_result(&run)
+    json_result(&normalize_run(&run))
 }
 
 /// One job of a workflow run, in one shape on both forges — a translation for the same reason
@@ -5876,6 +5902,35 @@ mod tests {
         assert!(v.get("permissions").is_none());
         // Absent optional fields are omitted, not serialized as null.
         assert!(v.get("private").is_none());
+    }
+
+    #[test]
+    fn a_repo_detail_names_its_origin_only_when_migrated() {
+        // Trimmed from what Codeberg answered migrate_repo with on 27 October 2026.
+        let migrated = serde_json::json!({
+            "full_name": "brechanbech/migrate-check-3-git",
+            "empty": false,
+            "mirror": false,
+            "original_url": "https://gitea.com/brechanbech/mcp-scratch.git",
+            "owner": { "login": "brechanbech", "email": "brechanbech@noreply.codeberg.org" },
+            "allow_squash_merge": true,
+            "wiki_clone_url": "https://codeberg.org/brechanbech/migrate-check-3-git.wiki.git"
+        });
+        let v = serde_json::to_value(repo_detail(migrated).unwrap()).unwrap();
+        assert_eq!(v["empty"], false);
+        assert_eq!(
+            v["original_url"],
+            "https://gitea.com/brechanbech/mcp-scratch.git"
+        );
+        assert!(v.get("owner").is_none());
+        assert!(v.get("allow_squash_merge").is_none());
+        assert!(v.get("wiki_clone_url").is_none());
+
+        // Every repository carries the field; a created one has it empty.
+        let created = serde_json::json!({ "full_name": "o/r", "empty": true, "original_url": "" });
+        let v = serde_json::to_value(repo_detail(created).unwrap()).unwrap();
+        assert_eq!(v["empty"], true);
+        assert!(v.get("original_url").is_none());
     }
 
     #[test]

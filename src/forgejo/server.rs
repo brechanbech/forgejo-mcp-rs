@@ -519,7 +519,7 @@ impl ForgejoMcp {
     #[tool(
         title = "Get a workflow run",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Get one Actions workflow run by run_id (owner/repo/run_id), full detail, as the instance returns it — Forgejo and Gitea shape this object differently"
+        description = "Get one Actions workflow run by run_id (owner/repo/run_id), in list_workflow_runs' shape on both forges: status (the outcome once there is one), event, workflow, ref, commit_sha, html_url and timestamps. For its jobs and logs use list_workflow_jobs and get_job_log."
     )]
     async fn get_workflow_run(
         &self,
@@ -685,7 +685,7 @@ impl ForgejoMcp {
             idempotent_hint = false,
             open_world_hint = true
         ),
-        description = "Create a repository for the authenticated user (requires write mode; defaults to private)"
+        description = "Create a repository for the authenticated user (requires write mode; defaults to private). Answers with the repository in get_repo's shape."
     )]
     async fn create_repo(
         &self,
@@ -773,7 +773,7 @@ impl ForgejoMcp {
             idempotent_hint = false,
             open_world_hint = true
         ),
-        description = "Create a branch in a repository (owner/repo/new_branch, optional old_ref; requires write mode)"
+        description = "Create a branch in a repository (owner/repo/new_branch, optional old_ref; requires write mode). Answers with the branch in list_branches' shape: name, head commit and protection."
     )]
     async fn create_branch(
         &self,

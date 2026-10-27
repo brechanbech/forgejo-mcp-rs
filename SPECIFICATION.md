@@ -500,7 +500,9 @@ minor bump.
 
 *`get_workflow_run` is deliberately left un-normalized.* It exists to return the instance's full,
 unmodified run object, so it stays shaped differently on each forge. `list_workflow_runs` is the
-normalized view; the tool descriptions say which is which.
+normalized view; the tool descriptions say which is which. *(Reversed in
+[v0.25.0](#v0250--every-write-answers-in-its-read-tools-shape): the full object was about
+20 KB, an email address included.)*
 
 *Dispatch adapts to the reply.* `return_run_info` — which makes the endpoint answer with the run
 it just created — is a Forgejo extension, so it is omitted on Gitea, which replies `204 No
@@ -994,6 +996,29 @@ read and write to the blocking thread pool; on macOS, Windows, FreeBSD and for a
 not a pipe it falls back to `stdio`. The rest (authorization, Streamable HTTP, client fixes)
 does not apply.
 
+### v0.25.0 — every write answers in its read tool's shape
+
+Four tools still handed the forge's object straight through, and they were the largest replies
+the server gave:
+
+| Tool | Passed through | Now |
+|---|---|---|
+| `get_workflow_run` | about 20 KB on Codeberg: the push `event_payload` as an escaped string, the repository twice, `trigger_user` with an email address | `list_workflow_runs`' run |
+| `create_repo`, `edit_repo`, `migrate_repo` | about 3 KB: the owner's profile and email, merge settings, wiki URLs, the time tracker | `get_repo`'s repository |
+| `create_branch` | the head commit in full: author, committer, verification | `list_branches`' branch |
+
+`get_workflow_run` had been left raw on purpose (see v0.20), as the place to see a run as the
+instance has it. In practice nothing in the raw run was worth its size: a run's jobs and logs
+have their own tools, and the payload repeats the commit list. It now normalizes like the
+listing, which is the breaking change.
+
+The repository shape gains three fields, for `get_repo` too: `empty`, which tells a fresh
+`create_repo` from one with commits; `mirror`; and `original_url`, kept only when it is not
+empty, which names a migrated repository's source.
+
+`add_push_mirror` and `list_push_mirrors` still pass through Forgejo's push-mirror object. It is
+about ten fields and carries no credential, so there is nothing to cut.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -1172,6 +1197,7 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
 18. **v0.24.0** — rmcp 3.8 and `stdio_pipes`; `migrate_repo` sends the credential where each importer reads it, refuses
     a username for the token services, and names the empty repository a failure leaves.
     *(done; verified live gitea.com → Codeberg)*
-19. Later — sort filters on the issue lists, slimming what still passes through raw
-    (`create_repo`, `create_branch`, `get_workflow_run`, `migrate_repo`), and binding the
-    migrate and mirror credentials to their hosts.
+19. **v0.25.0** — `get_workflow_run`, the repository writes and `create_branch` answer in
+    their read tools' shapes. *(done)*
+20. Later — sort filters on the issue lists, and binding the migrate and mirror credentials
+    to their hosts.

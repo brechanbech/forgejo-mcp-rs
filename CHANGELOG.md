@@ -8,6 +8,18 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.25.0] — 2026-10-27
+
+### Changed
+- **Breaking:** `get_workflow_run` answers in `list_workflow_runs`' normalized shape on both
+  forges, not with the instance's raw run. The raw run was about 20 KB on Codeberg, with the
+  whole push payload and the triggering user's email address.
+- `create_repo`, `edit_repo` and `migrate_repo` answer in `get_repo`'s shape, and
+  `create_branch` in `list_branches`'. They passed the forge's whole object through, with the
+  owner's profile and email, merge settings, and the branch's full head commit.
+- `get_repo` and the repository writes add `empty`, `mirror`, and `original_url` for a
+  migrated repository.
+
 ## [0.24.0] — 2026-10-27
 
 ### Changed

@@ -124,9 +124,7 @@ or `test-pr.yml@refs/pull/1117/head`. It is also the only reliable source of the
 `head_branch` is populated for branch runs and null for tags and pull requests.
 
 Two more things regardless of flavor. Gitea requires a token for the Actions API even on public
-repositories. And `get_workflow_run` deliberately returns the instance's full, unmodified run
-object, so that one *is* shaped differently on each forge; use `list_workflow_runs` when you
-want the normalized view.
+repositories. `get_workflow_run` answers in the same normalized shape as `list_workflow_runs`.
 
 ### Write mode
 
@@ -243,7 +241,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `list_pull_request_files` | read | Files a PR changes (auto-paginated), with per-file additions/deletions and rename info. Forgejo omits the hunks here — use `get_pull_request_diff` for content |
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
 | `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; newest first, 30 to a page by default; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
-| `get_workflow_run` | read | One workflow run by `run_id` (full detail) |
+| `get_workflow_run` | read | One workflow run by `run_id`, in `list_workflow_runs`' shape |
 | `list_workflow_jobs` | read | The jobs of one run, normalized on both forges; each job's `id` is what `get_job_log` takes. Forgejo 16+ |
 | `get_job_log` | read | Part of one job's log, fetched by HTTP `Range` — the last 32 KiB by default (`max_bytes` up to 1 MiB), cut to whole lines, colour codes and timestamps stripped. `earlier` / `later` give the next window to ask for. Forgejo 16+ |
 | `list_releases` | read | A repo's releases, newest first (auto-paginated), slimmed to identity plus `asset_count` and `asset_names` |
