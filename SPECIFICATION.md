@@ -71,6 +71,9 @@ follows the recommended migration: `init_tracing` writes to stderr, never `notif
 
 ## Configuration
 
+*These variables are planned to give way to a forges file; see
+[Proposed: forges](#proposed-forges).*
+
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `FORGEJO_TOKEN_READ_ONLY` | **yes**\* | — | Read token (read-only scopes suffice). `FORGEJO_TOKEN` is accepted as a fallback. |
@@ -1148,6 +1151,193 @@ proportionate replacement that we fully own and can audit. The
 strict-enum gaps simply don't exist when we define the response shapes ourselves (loose where
 it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dependency tree.
 
+## Proposed: forges
+
+*Proposed 27 October 2026; not built. To be implemented and tested once self-hosted Forgejo and
+Gitea instances are running, so it can be exercised against several forges at once.*
+
+### Why
+
+Configuration today assumes one instance per server entry, described by `FORGEJO_*` variables.
+With half a dozen forges in different places that breaks down:
+
+- **One server entry per instance does not scale.** Six forges would mean six entries, each
+  listing every tool, and none able to act on two forges in one call.
+- **Credentials for other hosts are not bound to them.** `FORGEJO_MIGRATE_TOKEN` is sent with
+  whatever `clone_addr` a call names, and `FORGEJO_MIRROR_TOKEN` with whatever
+  `remote_address`. A call steered by injected text could hand either to a host of its
+  choosing. And one variable per kind of credential serves only one other host.
+- **`FORGEJO_` is the wrong prefix for half the instances.** gitea.com is configured through
+  `FORGEJO_URL`.
+- **"Flavor" is an odd word** for whether an instance runs Forgejo or Gitea.
+
+### Terms
+
+A **forge** is one named place this server knows about: a name, a URL, a platform and its
+tokens. Codeberg, gitea.com, and self-hosted instances such as ManCave, GardenShed or
+ThunWilPrimary are each a forge. The name is local and descriptive; nothing on the forge
+itself knows it.
+
+A forge is not the forge's own users or organisations. Those stay what they are now: the
+`owner` argument of a tool, within a forge. ManCave is never an owner, and `brechanbech` is
+never a forge.
+
+The **platform** is the software a forge runs: `forgejo`, `gitea`, `github` or `gitlab`. It
+replaces "flavor".
+
+### One server per platform
+
+There are two server entries, split by platform, and that split is fixed:
+
+- the **Forgejo server** drives every forge whose platform is `forgejo`, Codeberg included;
+- the **Gitea server** drives every forge whose platform is `gitea`.
+
+There is never a server entry per forge. Each entry sets `FORGE_PLATFORM=forgejo` or
+`FORGE_PLATFORM=gitea`, and drives every forge of that platform in the forges file. Adding a
+forge means adding it to the file, not adding a server.
+
+Both entries run the same binary today. The split by platform is also what keeps a separate
+Gitea server possible later: if the two APIs diverge far enough, the Gitea entry points at a
+different binary and nothing else in the configuration changes.
+
+### The forges file
+
+Forges are declared in one TOML file, `~/.config/forgejo-mcp-rs/forges.toml` by default, or
+wherever `FORGES_FILE` points. Both servers read the same file. It holds no secrets: each token
+is named by the environment variable that holds it, so credentials still come only from the
+environment and the file can live in dotfiles.
+
+```toml
+[forges.Codeberg]
+url = "https://codeberg.org"
+platform = "forgejo"
+read_token_env = "CODEBERG_READ"
+write_token_env = "CODEBERG_WRITE"
+
+[forges.ManCave]
+url = "https://forge.mancave.lan"
+platform = "forgejo"
+read_token_env = "MANCAVE_READ"
+write_token_env = "MANCAVE_WRITE"
+export_token_env = "MANCAVE_EXPORT"
+mirror_token_env = "MANCAVE_MIRROR"
+
+[forges.GiteaCom]
+url = "https://gitea.com"
+platform = "gitea"
+read_token_env = "GITEACOM_READ"
+write_token_env = "GITEACOM_WRITE"
+export_token_env = "GITEACOM_EXPORT"
+
+[forges.GardenShed]
+url = "https://git.gardenshed.lan"
+platform = "gitea"
+read_token_env = "GARDENSHED_READ"
+write_token_env = "GARDENSHED_WRITE"
+
+[forges.GitHub]
+url = "https://github.com"
+platform = "github"
+mirror_token_env = "GITHUB_MIRROR"
+```
+
+With this file the Forgejo server drives Codeberg and ManCave, the Gitea server drives GiteaCom
+and GardenShed, and GitHub is driven by neither: it is there as a push-mirror target.
+
+### Choosing a forge in a call
+
+Every tool takes a `forge_shop` argument naming one of the forges its server drives. When a
+server drives a single forge, `forge_shop` may be left out; when it drives more than one, it is
+required on every tool, reads included, so that nothing lands on a forge by default. A name the
+server does not drive is refused, with the names it does.
+
+A new read tool, `list_forges`, lists the forges this server drives: name, URL, platform,
+whether a write token is configured, and whether write mode is on for each.
+
+### Write mode, per forge
+
+Write mode stays deliberate and time-boxed, but per forge: `enable_write_mode` takes
+`forge_shop`, and opening writes on ManCave leaves Codeberg read-only. Every write's reply names
+the forge and its URL ("write mode is on for ManCave, https://forge.mancave.lan/"), which is
+what the instance-naming rule was reaching for.
+
+### Tokens
+
+Every token belongs to the forge that issued it. Two of them are only ever handed to another
+forge:
+
+| Token | Scope on its own forge | Used by | For |
+|---|---|---|---|
+| read | read | this server, driving the forge | every read tool |
+| write | write | this server, driving the forge | the write tools, behind write mode |
+| export | read | another forge | migrating a repository *out of* this one |
+| mirror | write | another forge | push-mirroring a repository *into* this one |
+
+Export and mirror tokens are per forge, not per pair of forges: ManCave's export token serves a
+migration from ManCave into any other forge. A per-pair override would allow revoking what one
+destination has seen without disturbing the others; it is left out until it is needed.
+
+The read and write tokens keep today's rules: a read token is required, a write token alone is
+refused, and the two must differ.
+
+Each server needs, in its environment, the read and write tokens of the forges it drives, plus
+the export and mirror tokens of the forges it may migrate from or mirror to. A token can come
+from the server entry's `env` block or from the shell both servers inherit.
+
+### Platform
+
+`platform` is required; there is no `auto`. The detection that today chooses the flavor still
+runs, on each forge's first use, but as a check: if the file says `gitea` and the forge answers
+as Forgejo, every request to that forge is refused with a message naming the mismatch, rather
+than calls going to the other platform's endpoints.
+
+### Host binding
+
+Cross-forge credentials are chosen by forge, never sent to an arbitrary address:
+
+- `migrate_repo` takes `forge_shop` (the destination, one this server drives) and `source_shop`
+  (any forge in the file, of any platform). The `clone_addr` host must be the source shop's
+  host, and the credential is its export token. `authenticate` and `auth_username` go away,
+  along with `FORGEJO_MIGRATE_TOKEN`.
+- `add_push_mirror` takes `forge_shop` and `target_shop` (any forge in the file). The
+  `remote_address` host must be the target shop's host, and the credential is its mirror token.
+  `FORGEJO_MIRROR_TOKEN` goes away.
+
+A public source still needs no forge: `clone_addr` alone, with no credential.
+
+### From today's configuration
+
+With no forges file, the server keeps running from today's `FORGEJO_*` variables, as a single
+unnamed forge, and logs a deprecation warning. That mode is removed a release or two after
+forges ship; a 0.x minor bump allows it, as long as the CHANGELOG says so first.
+
+| Today | With forges |
+|---|---|
+| one entry per instance, `FORGEJO_URL` | one entry per platform, `FORGE_PLATFORM`; each forge's `url` in the file |
+| `FORGEJO_FLAVOR` | `platform` (required, no `auto`) |
+| `FORGEJO_TOKEN_READ_ONLY`, `FORGEJO_TOKEN` | `read_token_env` |
+| `FORGEJO_TOKEN_WRITE` | `write_token_env` |
+| `FORGEJO_MIGRATE_TOKEN` | the source forge's `export_token_env` |
+| `FORGEJO_MIRROR_TOKEN` | the target forge's `mirror_token_env` |
+| `FORGEJO_WRITE_MINUTES`, `FORGEJO_UPLOAD_ROOT`, `FORGEJO_UPLOAD_MAX_MB` | unchanged for now; per-server settings, not per-forge |
+
+### In the code
+
+- The HTTP client type `Forge` becomes `ForgeClient`, so that "forge" means the named place. The
+  server holds one `ForgeClient` per forge it drives, keyed by name.
+- `Flavor` becomes `Platform`.
+- The crate, the binary and the MCP registry name stay `forgejo-mcp-rs`. Below that, "forgejo"
+  naming that means "either platform" (the `src/forgejo/` module, the instructions text) is
+  retired as each part is touched.
+- Platform differences stay inside `ForgeClient`, keyed by `Platform`, as the Actions
+  translation already is. Tool code does not branch on the platform except to ask the client.
+  That, and the per-platform servers, keep a future Gitea split cheap.
+
+### Not decided yet
+
+- Whether the read tools ever reach a `github` or `gitlab` forge.
+- Whether `list_forges` also replaces `write_status`, which would then report every forge.
+
 ## Milestones
 
 1. **v0.1.0** — read-only surface, validated against live Codeberg, tagged. *(done)*
@@ -1199,5 +1389,9 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     *(done; verified live gitea.com → Codeberg)*
 19. **v0.25.0** — `get_workflow_run`, the repository writes and `create_branch` answer in
     their read tools' shapes. *(done)*
-20. Later — sort filters on the issue lists, and binding the migrate and mirror credentials
-    to their hosts.
+20. **Forges** — named forges in a forges file, one server per platform driving all of that
+    platform's forges, a `forge_shop` argument on every tool, write mode per forge,
+    `platform` in place of flavor, and credentials bound to the forge that issued them. See
+    [Proposed: forges](#proposed-forges). *(proposed; waiting for self-hosted instances to test
+    against)*
+21. Later — sort filters on the issue lists.
