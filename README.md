@@ -216,73 +216,123 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 
 ## Tools
 
+Grouped by subject. The second column marks the tools that need write mode.
+
+### Account and instance
+
 | Tool |  | Notes |
 |---|---|---|
 | `whoami` | read | The authenticated user (verifies the token) |
 | `version` | read | This MCP server's version, the connected instance's version, and its `flavor` (`forgejo` or `gitea`) |
-| `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
-| `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default), without the pull requests the forges also list as issues. Filter by `labels`, `milestones`, `author`, `assignee`, `mentioned`, `search`, and `since`/`before`; an unknown label or milestone name is refused, since the forge would list everything. `sort` (`oldest`, `recentupdate`, `mostcomment`, `nearduedate`, …) works on Forgejo; Gitea's issue listing has none, so it is refused there. Slimmed: state, author, labels, assignees, milestone, comment count and dates; `get_issue` adds the body |
-| `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default); filter by `base` and `head` branch (`head` may be `owner:branch`) to ask whether a branch already has an open pull request, and by `author`; `sort` by `oldest`, `recentupdate`, `recentclose`, `mostcomment` and others, on both forges. Slimmed: branches, state, `head_sha`, author, labels and dates; `get_pull_request` adds the description, reviewers and merge details |
-| `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
-| `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
-| `list_commits` | read | Commits on a ref (`owner/repo`, optional `sha` and `path`; auto-paginated). Slimmed to sha, subject, author, date and signature state — the raw objects carry base64 `signature`/`payload` blobs and per-commit `files`/`stats` |
-| `get_commit` | read | One commit (`owner/repo/sha`), same fields. `signature` is `verified`, `unverified` or `unsigned`; `signer` on the first, `reason` on the second |
-| `list_keys` | read | An account's SSH and GPG keys (omit `username` for yourself). `verified` decides whether a signature can verify at all — but **Gitea omits the field on SSH keys**, so absent means unreported, not unverified. GPG entries carry the addresses the key covers and whether each is activated |
-| `list_branch_protections` | read | A repository's protection rules: what each enforces (`require_signed_commits`, direct pushes, approvals, status checks) for a branch name or glob. Allowlists omitted; an empty list means nothing is protected |
-| `get_commit_statuses` | read | Individual statuses against a commit/branch/tag: context, status, description, `target_url`. `get_combined_status` rolls these into one verdict |
-| `get_combined_status` | read | The rolled-up CI verdict for a ref — one state plus the latest per check. The tool for "did CI pass?"; `get_commit_statuses` gives the transition history |
-| `get_repo_tree` | read | A repository's git tree (optional `sha`, `recursive`). Entries are path/type/size/sha; check `truncated` before concluding a file is absent |
-| `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). Optional `start_line`/`end_line` take a 1-indexed inclusive window, clamped to the file; `total_lines` is always reported |
-| `search_repos` | read | Repository search by keyword |
 | `list_orgs` | read | Organizations you belong to |
 | `list_notifications` | read | Your notification threads, slimmed (`all=true` for read+unread) |
+| `list_keys` | read | An account's SSH and GPG keys (omit `username` for yourself). `verified` decides whether a signature can verify at all — but **Gitea omits the field on SSH keys**, so absent means unreported, not unverified. GPG entries carry the addresses the key covers and whether each is activated |
+
+### Write-mode switches
+
+| Tool |  | Notes |
+|---|---|---|
+| `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
+| `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
+
+### Repositories
+
+| Tool |  | Notes |
+|---|---|---|
+| `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
+| `search_repos` | read | Repository search by keyword |
+| `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
+| `create_repo` | **write** | Create a repo (defaults to private) |
+| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo that plainly exists as missing |
+| `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
+| `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Answers once the import has finished, and names any empty repository a failure left behind; leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
+
+### Files
+
+| Tool |  | Notes |
+|---|---|---|
+| `get_repo_tree` | read | A repository's git tree (optional `sha`, `recursive`). Entries are path/type/size/sha; check `truncated` before concluding a file is absent |
+| `get_file_contents` | read | Read a file (decodes text) or list a directory (`owner/repo/path`, optional `ref`). Optional `start_line`/`end_line` take a 1-indexed inclusive window, clamped to the file; `total_lines` is always reported |
+| `create_or_update_file` | **write** | Create a file, or replace its content, as one commit (owner/repo/path/content as UTF-8 text). Pass the current `sha` from `get_file_contents` to update; a stale one is refused. Optional `message`, `branch`, `new_branch` |
+| `delete_file` | **write** | Delete a file as one commit (owner/repo/path/sha). Optional `message`, `branch`, `new_branch` |
+
+### Branches and commits
+
+| Tool |  | Notes |
+|---|---|---|
+| `list_branches` | read | Branches in `owner/repo` (auto-paginated, slimmed to name/commit/protected) |
+| `list_branch_protections` | read | A repository's protection rules: what each enforces (`require_signed_commits`, direct pushes, approvals, status checks) for a branch name or glob. Allowlists omitted; an empty list means nothing is protected |
+| `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
+| `delete_branch` | **write** | Delete a branch (owner/repo/branch). The forge refuses the default and protected branches |
+| `list_commits` | read | Commits on a ref (`owner/repo`, optional `sha` and `path`; auto-paginated). Slimmed to sha, subject, author, date and signature state — the raw objects carry base64 `signature`/`payload` blobs and per-commit `files`/`stats` |
+| `get_commit` | read | One commit (`owner/repo/sha`), same fields. `signature` is `verified`, `unverified` or `unsigned`; `signer` on the first, `reason` on the second |
+| `get_commit_statuses` | read | Individual statuses against a commit/branch/tag: context, status, description, `target_url`. `get_combined_status` rolls these into one verdict |
+| `get_combined_status` | read | The rolled-up CI verdict for a ref — one state plus the latest per check. The tool for "did CI pass?"; `get_commit_statuses` gives the transition history |
+
+### Issues
+
+| Tool |  | Notes |
+|---|---|---|
+| `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default), without the pull requests the forges also list as issues. Filter by `labels`, `milestones`, `author`, `assignee`, `mentioned`, `search`, and `since`/`before`; an unknown label or milestone name is refused, since the forge would list everything. `sort` (`oldest`, `recentupdate`, `mostcomment`, `nearduedate`, …) works on Forgejo; Gitea's issue listing has none, so it is refused there. Slimmed: state, author, labels, assignees, milestone, comment count and dates; `get_issue` adds the body |
 | `list_issue_comments` | read | Comments on an issue/PR (slimmed) |
-| `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
+| `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
+| `edit_issue` | **write** | Edit an issue in place (owner/repo/index): `state` open/closed, `title`, `body`, `assignees`, `milestone`, `due_date`, `labels` (names). Only what is passed changes; works on a pull request's number too, so `state: closed` closes a PR unmerged |
+| `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |
+
+### Pull requests
+
+| Tool |  | Notes |
+|---|---|---|
+| `list_pull_requests` / `get_pull_request` | read | Pull requests in `owner/repo` (open by default); filter by `base` and `head` branch (`head` may be `owner:branch`) to ask whether a branch already has an open pull request, and by `author`; `sort` by `oldest`, `recentupdate`, `recentclose`, `mostcomment` and others, on both forges. Slimmed: branches, state, `head_sha`, author, labels and dates; `get_pull_request` adds the description, reviewers and merge details |
 | `list_pull_request_files` | read | Files a PR changes (auto-paginated), with per-file additions/deletions and rename info. Forgejo omits the hunks here — use `get_pull_request_diff` for content |
 | `get_pull_request_diff` | read | A PR's unified diff. `file_path` narrows it to one file (matching either side of a rename); otherwise truncated at 64 KiB, raise with `max_bytes` |
+| `list_pull_request_reviews` | read | Reviews on a PR — approve/request-changes/comment verdicts + summary bodies (inline comments as a count) |
+| `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |
+| `create_pull_request_review` | **write** | Review a PR (owner/repo/index/verdict): `approve`, `request_changes` or `comment`, with a summary `body` and optional `commit_id` |
+| `merge_pull_request` | **write** | Merge a PR (owner/repo/index): `style` merge/rebase/rebase-merge/squash/fast-forward-only, optional title/message, `delete_branch`, and a `head_sha` guard that refuses the merge if the head moved. Answers with the PR as it now stands |
+
+### Actions (CI)
+
+| Tool |  | Notes |
+|---|---|---|
 | `list_workflow_runs` | read | Actions (CI) runs in `owner/repo`, slimmed to one shape on both forges; newest first, 30 to a page by default; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. Outcome is in each run's `status` |
 | `get_workflow_run` | read | One workflow run by `run_id`, in `list_workflow_runs`' shape |
 | `list_workflow_jobs` | read | The jobs of one run, normalized on both forges; each job's `id` is what `get_job_log` takes. Forgejo 16+ |
 | `get_job_log` | read | Part of one job's log, fetched by HTTP `Range` — the last 32 KiB by default (`max_bytes` up to 1 MiB), cut to whole lines, colour codes and timestamps stripped. `earlier` / `later` give the next window to ask for. Forgejo 16+ |
+| `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run on Forgejo, an acknowledgement on Gitea |
+| `cancel_workflow_run` | **write** | Cancel a pending or running run (owner/repo/`run_id`); answers with the run as it now stands. Forgejo 16+ |
+| `rerun_workflow` | **write** | Rerun a finished run, or with `job_id` one job and the jobs that depend on it; answers with the run. Forgejo 17+ — an instance without the endpoint is reported as such, with its version, and nothing is rerun |
+
+### Releases
+
+| Tool |  | Notes |
+|---|---|---|
 | `list_releases` | read | A repo's releases, newest first (auto-paginated), slimmed to identity plus `asset_count` and `asset_names` |
 | `get_release` | read | One release by git **tag** — the lookup that makes a release script idempotent. The same slim shape, plus the notes and `target_commitish` |
 | `list_release_assets` | read | A release's attached files (`id`, name, size, download URL) by `release_id` |
-| `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
-| `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
-| `create_repo` | **write** | Create a repo (defaults to private) |
-| `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Answers once the import has finished, and names any empty repository a failure left behind; leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
-| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo that plainly exists as missing |
-| `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
-| `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
-| `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |
-| `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |
-| `edit_issue` | **write** | Edit an issue in place (owner/repo/index): `state` open/closed, `title`, `body`, `assignees`, `milestone`, `due_date`, `labels` (names). Only what is passed changes; works on a pull request's number too, so `state: closed` closes a PR unmerged |
-| `create_pull_request_review` | **write** | Review a PR (owner/repo/index/verdict): `approve`, `request_changes` or `comment`, with a summary `body` and optional `commit_id` |
-| `merge_pull_request` | **write** | Merge a PR (owner/repo/index): `style` merge/rebase/rebase-merge/squash/fast-forward-only, optional title/message, `delete_branch`, and a `head_sha` guard that refuses the merge if the head moved. Answers with the PR as it now stands |
-| `delete_branch` | **write** | Delete a branch (owner/repo/branch). The forge refuses the default and protected branches |
-| `create_or_update_file` | **write** | Create a file, or replace its content, as one commit (owner/repo/path/content as UTF-8 text). Pass the current `sha` from `get_file_contents` to update; a stale one is refused. Optional `message`, `branch`, `new_branch` |
-| `delete_file` | **write** | Delete a file as one commit (owner/repo/path/sha). Optional `message`, `branch`, `new_branch` |
-| `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
-| `add_push_mirror` | **write** | Auto-push a repo to an external remote (e.g. a GitHub mirror); credential from `FORGEJO_MIRROR_TOKEN` or `use_ssh=true` |
-| `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
-| `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
-| `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
 | `create_release` | **write** | Create a release on a tag (`tag_name`; `target_commitish` creates the tag when it does not exist) |
 | `edit_release` | **write** | Edit a release in place by `release_id` — `body` (the notes), `name`, `tag_name`, `draft`, `prerelease`. Only the fields passed are sent, so omitting one leaves it alone |
 | `upload_release_asset` | **write** | Attach a **local file** to a release. Confined to `FORGEJO_UPLOAD_ROOT`; disabled entirely when that is unset |
 | `delete_release_asset` | **write** | Remove one asset by `attachment_id` — needed to replace a same-named file, which Forgejo would otherwise keep alongside |
-| `dispatch_workflow` | **write** | Trigger an Actions workflow via `workflow_dispatch` (owner/repo/`workflow` file name/`ref`, optional `inputs`); returns the created run on Forgejo, an acknowledgement on Gitea |
-| `cancel_workflow_run` | **write** | Cancel a pending or running run (owner/repo/`run_id`); answers with the run as it now stands. Forgejo 16+ |
-| `rerun_workflow` | **write** | Rerun a finished run, or with `job_id` one job and the jobs that depend on it; answers with the run. Forgejo 17+ — an instance without the endpoint is reported as such, with its version, and nothing is rerun |
+
+### Push mirrors
+
+| Tool |  | Notes |
+|---|---|---|
+| `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |
+| `add_push_mirror` | **write** | Auto-push a repo to an external remote (e.g. a GitHub mirror); credential from `FORGEJO_MIRROR_TOKEN` or `use_ssh=true` |
+| `delete_push_mirror` | **write** | Remove a push mirror by `remote_name` |
+| `sync_push_mirrors` | **write** | Trigger an immediate push-mirror sync |
+
+### Paging and slimming
 
 Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limit`. Called
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole
 set and return a `{ returned, total, truncated, items }` envelope; pass an explicit `page` or
 `limit` for a single page, which returns `{ page, limit, returned, total, items }` instead
-(`total` is `null` for `search_repos`, which reports no count). Repository, notification,
-comment, and review results are slimmed to the fields that matter. The **write** tools require
-write mode (above); editing existing issues/PRs is future work — see the
-[specification](SPECIFICATION.md).
+(`total` is `null` for `search_repos`, which reports no count). Results are slimmed to the
+fields that matter, and a write answers in the shape of the matching read tool. The **write**
+tools require [write mode](#write-mode).
 
 ### Moving a repo between instances
 
