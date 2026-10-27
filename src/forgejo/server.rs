@@ -729,7 +729,7 @@ impl ForgejoMcp {
             idempotent_hint = false,
             open_world_hint = true
         ),
-        description = "Migrate (copy) a repository from ANOTHER forge/instance into this one — the only way to move issues and PRs across instances, unlike push mirrors which carry git refs only. Give clone_addr (http/https URL on the source) and repo_name. Set service to the source forge (\"gitea\" for Forgejo; the default \"git\" copies refs only) and turn on issues/pull_requests/labels/milestones/releases/wiki, which all default to false. The import is ASYNCHRONOUS: the repo comes back immediately and fills in over the following seconds or minutes, so poll get_repo to confirm. This copies — the source repo is left untouched. Requires write mode. For a private source, the credential comes from the server's FORGEJO_MIGRATE_TOKEN env var — never pass it as an argument; set auth_username or authenticate=true to use it."
+        description = "Migrate (copy) a repository from ANOTHER forge/instance into this one — the only way to move issues and PRs across instances, unlike push mirrors which carry git refs only. Give clone_addr (http/https URL on the source) and repo_name. Set service to the source forge (\"gitea\" for Forgejo; the default \"git\" copies refs only) and turn on issues/pull_requests/labels/milestones/releases/wiki, which all default to false. The import runs within the call, which answers with the finished repository (seconds for a small one). A failure can leave an empty repository under repo_name; the error says so, and it must be deleted before retrying under that name. This copies — the source repo is left untouched. Requires write mode. For a private source, the credential comes from the server's FORGEJO_MIGRATE_TOKEN env var — never pass it as an argument. Set authenticate=true to send it; auth_username is only for service git (optional), onedev and codebase, and is refused for gitea, github, gitlab, gogs and gitbucket, whose importers ignore the token when given a username."
     )]
     async fn migrate_repo(
         &self,
@@ -1230,12 +1230,13 @@ impl ForgejoMcp {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ForgejoMcp {
     fn get_info(&self) -> ServerConfig {
-        // Lean on Default for protocol_version (ProtocolVersion::LATEST, 2025-11-25 in rmcp 3.4).
+        // Lean on Default for protocol_version (ProtocolVersion::LATEST, 2026-07-28 since rmcp
+        // 3.5); rmcp negotiates down to an older client's version.
         // ServerConfig is #[non_exhaustive], so mutate a Default rather than use a struct literal.
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         // NOT Default: `Implementation::from_build_env` expands `env!` inside rmcp, so it names
-        // the SDK ("rmcp 3.4.0") rather than this server. Clients see this in `server/discover`.
+        // the SDK ("rmcp 3.8.0") rather than this server. Clients see this in `server/discover`.
         // The crate, the binary, and the server all share the name.
         info.server_info = Implementation::new("forgejo-mcp-rs", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
@@ -1264,8 +1265,9 @@ impl ServerHandler for ForgejoMcp {
              FORGEJO_MIRROR_TOKEN env var (or use_ssh=true) — never pass a token as an argument. \
              migrate_repo copies a repo in from ANOTHER instance and is the only tool that can \
              carry issues/PRs across instances (push mirrors are git-only); it requires write \
-             mode, runs asynchronously (poll get_repo), leaves the source untouched, and takes \
-             any source credential from FORGEJO_MIGRATE_TOKEN — again never as an argument. \
+             mode, answers once the import has finished, leaves the source untouched, and takes \
+             any source credential from FORGEJO_MIGRATE_TOKEN (send it with authenticate=true) \
+             — again never as an argument. \
              Releases: list_releases, get_release (by tag) and list_release_assets are \
              read-only; create_release, edit_release, upload_release_asset and \
              delete_release_asset require write mode. To publish a build, look the tag up \

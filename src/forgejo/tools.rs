@@ -2225,6 +2225,16 @@ const MIGRATE_SERVICES: [&str; 8] = [
     "codebase",
 ];
 
+/// Services whose importer authenticates with a username and password, so the server's token
+/// goes in `auth_password`. A plain `git` clone builds its URL from those two fields and never
+/// reads `auth_token`; the `onedev` and `codebase` importers take no token at all. Every other
+/// service authenticates by `auth_token`.
+const MIGRATE_PASSWORD_SERVICES: [&str; 3] = ["git", "onedev", "codebase"];
+
+/// The username a plain `git` clone sends with the token as its password when the caller names
+/// none. Forgejo, Gitea and GitLab accept a token under it over HTTP basic auth.
+const MIGRATE_DEFAULT_CLONE_USER: &str = "oauth2";
+
 /// Parameters for the `migrate_repo` tool.
 ///
 /// Mirrors Forgejo's `MigrateRepoOptions`, minus the credential: the source password/token is
@@ -2250,14 +2260,15 @@ pub struct MigrateRepoParams {
     /// Visibility of the new repository. Defaults to private.
     #[serde(default)]
     pub private: Option<bool>,
-    /// Username on the *source* instance. Setting it turns on authentication (the token comes
-    /// from the server's `FORGEJO_MIGRATE_TOKEN`). Leave unset for a public source, or when the
-    /// source authenticates by bare token — then set `authenticate = true` instead.
+    /// Username on the *source* instance, sent with the token as its password. Only for `git`
+    /// (optional, defaults to `oauth2`), `onedev` and `codebase` (required); refused for the
+    /// other services, which authenticate by token alone and ignore the token when given a
+    /// username. Setting it turns on authentication.
     #[serde(default)]
     pub auth_username: Option<String>,
-    /// Send the server's `FORGEJO_MIGRATE_TOKEN` as the source credential. Implied when
-    /// `auth_username` is set. Needed on its own for token-only auth, and for private
-    /// GitHub/GitLab sources.
+    /// Send the server's `FORGEJO_MIGRATE_TOKEN` as the source credential: as a token for
+    /// `github`, `gitea`, `gitlab`, `gogs` and `gitbucket`, as the clone password for `git`.
+    /// Leave unset for a public source.
     #[serde(default)]
     pub authenticate: Option<bool>,
     /// Also migrate issues. Requires a non-`git` `service`. Defaults to false.
@@ -2416,6 +2427,8 @@ fn migrate_repo_body(
         ));
     }
 
+    let service = params.service.clone().unwrap_or_else(|| "git".to_owned());
+
     let mut body = serde_json::Map::new();
     body.insert("clone_addr".to_owned(), Value::String(addr.to_owned()));
     body.insert("repo_name".to_owned(), Value::String(params.repo_name));
@@ -2456,25 +2469,61 @@ fn migrate_repo_body(
     }
 
     // Authentication is opt-in: most migrations read a public source and need no credential at
-    // all. Naming a username implies it; `authenticate` alone covers token-only forges.
-    let wants_auth = params.authenticate.unwrap_or(false) || params.auth_username.is_some();
-    if wants_auth {
-        let token = migrate_token.ok_or_else(|| {
-            McpError::invalid_params(
-                "no source credential configured: set FORGEJO_MIGRATE_TOKEN on the server to a \
-                 token for the *source* instance, or drop auth_username/authenticate if the \
-                 source repository is public"
-                    .to_owned(),
-                None,
-            )
-        })?;
-        if let Some(username) = params.auth_username {
-            body.insert("auth_username".to_owned(), Value::String(username));
-        }
+    // all. Naming a username implies it.
+    if params.authenticate.unwrap_or(false) || params.auth_username.is_some() {
+        insert_migrate_credential(&mut body, &service, params.auth_username, migrate_token)?;
+    }
+    Ok(body)
+}
+
+/// Splices the server's source credential into a migration body, in the fields `service`'s
+/// importer reads it from.
+fn insert_migrate_credential(
+    body: &mut serde_json::Map<String, Value>,
+    service: &str,
+    auth_username: Option<String>,
+    migrate_token: Option<&str>,
+) -> Result<(), McpError> {
+    let by_password = MIGRATE_PASSWORD_SERVICES.contains(&service);
+    // A token service given a username stops using the token: Forgejo's Gitea importer then
+    // authenticates with the username and an empty password, and Codeberg answers an empty 500
+    // (27 October 2026). Refuse before anything is created rather than leave a stub behind.
+    if !by_password && auth_username.is_some() {
+        return Err(McpError::invalid_params(
+            format!(
+                "migrate refused: service \"{service}\" authenticates by token alone, and a \
+                 username makes the instance ignore the token — drop auth_username and set \
+                 authenticate=true"
+            ),
+            None,
+        ));
+    }
+    if service != "git" && by_password && auth_username.is_none() {
+        return Err(McpError::invalid_params(
+            format!(
+                "migrate refused: service \"{service}\" authenticates with a username and the \
+                 token as its password — set auth_username to the account on the source"
+            ),
+            None,
+        ));
+    }
+    let token = migrate_token.ok_or_else(|| {
+        McpError::invalid_params(
+            "no source credential configured: set FORGEJO_MIGRATE_TOKEN on the server to a token \
+             for the *source* instance, or drop auth_username/authenticate if the source \
+             repository is public"
+                .to_owned(),
+            None,
+        )
+    })?;
+    if by_password {
+        let username = auth_username.unwrap_or_else(|| MIGRATE_DEFAULT_CLONE_USER.to_owned());
+        body.insert("auth_username".to_owned(), Value::String(username));
+        body.insert("auth_password".to_owned(), Value::String(token.to_owned()));
+    } else {
         body.insert("auth_token".to_owned(), Value::String(token.to_owned()));
     }
-
-    Ok(body)
+    Ok(())
 }
 
 /// Migrates (copies) a repository from another forge into this instance, optionally bringing
@@ -2482,18 +2531,86 @@ fn migrate_repo_body(
 ///
 /// The source credential is supplied by the server via `FORGEJO_MIGRATE_TOKEN`
 /// (`migrate_token`), never as a tool argument, so it stays out of the conversation.
+///
+/// The import runs inside the request: Codeberg answers once it has finished (27 October 2026).
+/// A failed import, a 500 or a 422 alike, can leave an empty repository behind under the target
+/// name, which blocks a retry. So the name is checked to be free first, and looked up again
+/// after a failure to say whether something was left.
 pub async fn migrate_repo(
     forge: &Forge,
     migrate_token: Option<&str>,
     params: MigrateRepoParams,
 ) -> Result<CallToolResult, McpError> {
+    let owner = params.repo_owner.clone();
+    let name = params.repo_name.trim().to_owned();
     let body = migrate_repo_body(params, migrate_token)?;
-    // The Repository response carries no credential — safe to return verbatim.
-    let repo = forge
-        .migrate_repo(&Value::Object(body))
-        .await
-        .map_err(to_mcp)?;
-    json_result(&repo)
+    let authenticated = body.contains_key("auth_token") || body.contains_key("auth_password");
+    let owner = if let Some(owner) = owner {
+        owner
+    } else {
+        let me = forge.user_get_current().await.map_err(to_mcp)?;
+        me["login"].as_str().unwrap_or_default().to_owned()
+    };
+    match forge.get_repo(&owner, &name).await {
+        Ok(_) => {
+            return Err(McpError::invalid_params(
+                format!("migrate refused: {owner}/{name} already exists"),
+                None,
+            ));
+        }
+        Err(ForgeError::Status {
+            code: StatusCode::NOT_FOUND,
+            ..
+        }) => {}
+        Err(e) => return Err(to_mcp(e)),
+    }
+    match forge.migrate_repo(&Value::Object(body)).await {
+        // The Repository response carries no credential, so it is safe to return verbatim.
+        Ok(repo) => json_result(&repo),
+        Err(e) => {
+            let left_behind = forge.get_repo(&owner, &name).await.is_ok();
+            Err(migrate_failure(
+                &e,
+                &owner,
+                &name,
+                authenticated,
+                left_behind,
+            ))
+        }
+    }
+}
+
+/// The error for a failed migration: the forge's own, plus what it does not say. Codeberg
+/// reports a source that refused the credential as an empty 500, and both a 500 and a 422 can
+/// leave the half-made repository in place.
+fn migrate_failure(
+    err: &ForgeError,
+    owner: &str,
+    name: &str,
+    authenticated: bool,
+    left_behind: bool,
+) -> McpError {
+    // The forge's body ends in a newline, which would split the notes below onto lines of
+    // their own.
+    let mut message = err.to_string().trim_end().to_owned();
+    if authenticated && matches!(err, ForgeError::Status { code, .. } if code.is_server_error()) {
+        message.push_str(
+            ". A server error here usually means the source refused the request: check that the \
+             source repository exists, and that FORGEJO_MIGRATE_TOKEN is still valid, can read \
+             it, and covers private repositories if this one is",
+        );
+    }
+    if left_behind {
+        message = format!(
+            "{message}. The failed import left an empty {owner}/{name} behind; delete it with \
+             delete_repo before retrying under that name"
+        );
+    }
+    if err.is_caller_error() {
+        McpError::invalid_params(message, None)
+    } else {
+        McpError::internal_error(message, None)
+    }
 }
 
 /// Parameters for the `create_issue` tool.
@@ -5295,20 +5412,86 @@ mod tests {
     }
 
     #[test]
-    fn migrate_repo_body_splices_in_the_server_token_when_auth_is_requested() {
-        // A username implies authentication...
-        let mut params = migrate_params("https://example.com/o/r.git");
-        params.auth_username = Some("brechanbech".to_owned());
-        let body = migrate_repo_body(params, Some("tok")).unwrap();
-        assert_eq!(body["auth_username"], "brechanbech");
-        assert_eq!(body["auth_token"], "tok");
-
-        // ...and so does `authenticate` alone, for token-only forges.
-        let mut params = migrate_params("https://example.com/o/r.git");
+    fn a_token_service_gets_the_token_alone() {
+        let mut params = migrate_params("https://gitea.com/o/r.git");
+        params.service = Some("gitea".to_owned());
         params.authenticate = Some(true);
         let body = migrate_repo_body(params, Some("tok")).unwrap();
         assert_eq!(body["auth_token"], "tok");
         assert!(body.get("auth_username").is_none());
+        assert!(body.get("auth_password").is_none());
+    }
+
+    #[test]
+    fn a_token_service_refuses_a_username() {
+        // Forgejo's Gitea importer ignores the token once a username is given, and Codeberg
+        // answered that with an empty 500 and a stub repository (27 October 2026).
+        let mut params = migrate_params("https://gitea.com/o/r.git");
+        params.service = Some("gitea".to_owned());
+        params.auth_username = Some("brechanbech".to_owned());
+        let err = migrate_repo_body(params, Some("tok")).unwrap_err();
+        assert!(err.message.contains("authenticate=true"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_plain_clone_sends_the_token_as_its_password() {
+        // No service means `git`, whose clone URL is built from username and password only.
+        let mut params = migrate_params("https://example.com/o/r.git");
+        params.authenticate = Some(true);
+        let body = migrate_repo_body(params, Some("tok")).unwrap();
+        assert_eq!(body["auth_username"], "oauth2");
+        assert_eq!(body["auth_password"], "tok");
+        assert!(body.get("auth_token").is_none());
+
+        let mut params = migrate_params("https://example.com/o/r.git");
+        params.auth_username = Some("brechanbech".to_owned());
+        let body = migrate_repo_body(params, Some("tok")).unwrap();
+        assert_eq!(body["auth_username"], "brechanbech");
+        assert_eq!(body["auth_password"], "tok");
+    }
+
+    #[test]
+    fn a_password_service_other_than_git_needs_a_username() {
+        let mut params = migrate_params("https://onedev.example/o/r");
+        params.service = Some("onedev".to_owned());
+        params.authenticate = Some(true);
+        assert!(migrate_repo_body(params, Some("tok")).is_err());
+
+        let mut params = migrate_params("https://onedev.example/o/r");
+        params.service = Some("onedev".to_owned());
+        params.auth_username = Some("me".to_owned());
+        let body = migrate_repo_body(params, Some("tok")).unwrap();
+        assert_eq!(body["auth_username"], "me");
+        assert_eq!(body["auth_password"], "tok");
+    }
+
+    #[test]
+    fn a_failed_migration_names_the_repository_it_left_behind() {
+        let err = ForgeError::Status {
+            code: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "{\"message\":\"\"}\n".to_owned(),
+        };
+        let mcp = migrate_failure(&err, "o", "r", true, true);
+        assert!(
+            mcp.message.contains("source refused the request"),
+            "{}",
+            mcp.message
+        );
+        assert!(mcp.message.contains("empty o/r behind"), "{}", mcp.message);
+        assert!(!mcp.message.contains('\n'), "{}", mcp.message);
+
+        // A 422 says what went wrong itself; only the leftover is added.
+        let err = ForgeError::Status {
+            code: StatusCode::UNPROCESSABLE_ENTITY,
+            body: "Authentication failed".to_owned(),
+        };
+        let mcp = migrate_failure(&err, "o", "r", true, false);
+        assert!(
+            !mcp.message.contains("refused the request"),
+            "{}",
+            mcp.message
+        );
+        assert!(!mcp.message.contains("behind"), "{}", mcp.message);
     }
 
     #[test]

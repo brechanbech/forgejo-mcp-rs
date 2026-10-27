@@ -67,7 +67,9 @@ pub const TOOL_LIST_TTL_MS: u64 = 60 * 60 * 1000;
 
 /// Wraps a router's tools in a [`ListToolsResult`] carrying the SEP-2549 cache hints (`ttlMs`,
 /// `cacheScope`) that protocol version `2026-07-28` requires. Servers override `list_tools` with
-/// this instead of the `#[tool_handler]`-generated body, which leaves both fields `None`.
+/// this instead of the `#[tool_handler]`-generated body, which leaves both fields `None`. Since
+/// rmcp 3.5.1 those would be filled in for a `2026-07-28` peer anyway, but with the most cautious
+/// values (`ttlMs: 0`, private), which would have a client re-list the tools on every turn.
 ///
 /// `cacheScope` is [`CacheScope::Public`]: the tool set depends only on the binary, never on the
 /// caller or its token. Write-mode elevation gates the write tools at *call* time — it never

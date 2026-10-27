@@ -8,7 +8,7 @@ pub(crate) mod server;
 pub(crate) mod tools;
 
 use anyhow::Context as _;
-use rmcp::{ServiceExt as _, transport::stdio};
+use rmcp::{ServiceExt as _, transport::stdio_pipes};
 
 use server::ForgejoMcp;
 
@@ -25,8 +25,11 @@ pub async fn serve() -> anyhow::Result<()> {
     tracing::info!(target: "forgejo_mcp.startup", version = env!("CARGO_PKG_VERSION"));
 
     // stdio transport: JSON-RPC frames over stdin/stdout, so all logs MUST go to stderr.
+    // `stdio_pipes` drives the pipes an MCP client launches us with through Tokio's reactor on
+    // Linux, instead of a blocking-pool hand-off per message; elsewhere, and for anything that
+    // is not a pipe, it is plain `stdio`.
     let service = ForgejoMcp::from_env()?
-        .serve(stdio())
+        .serve(stdio_pipes())
         .await
         .context("failed to start MCP service on stdio")?;
 

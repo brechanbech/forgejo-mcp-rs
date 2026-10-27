@@ -8,6 +8,27 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.24.0] — 2026-10-27
+
+### Changed
+- **Breaking:** `migrate_repo` refuses `auth_username` for the `gitea`, `github`, `gitlab`,
+  `gogs` and `gitbucket` services. Their importers ignore the token once a username is given,
+  which made every authenticated Gitea migration fail. Use `authenticate: true`.
+- `migrate_repo` refuses a target name that already exists, before anything is created.
+- rmcp 3.8 (from 3.4). The stdio transport is now `stdio_pipes`, which on Linux runs the
+  client's pipes on Tokio's reactor rather than the blocking thread pool, and is plain stdio
+  elsewhere.
+
+### Fixed
+- `migrate_repo` with `service: git` sends the token as the clone password (username
+  `auth_username`, default `oauth2`); it could not authenticate before. `onedev` and
+  `codebase` get it the same way and need `auth_username`.
+- A failed `migrate_repo` names the empty repository it left behind, which has to be deleted
+  before a retry, and after a server error with a credential sent, says the source likely
+  refused it.
+- The docs called the migration asynchronous and said to poll `get_repo`. It finishes within
+  the call.
+
 ## [0.23.0] — 2026-10-27
 
 ### Added

@@ -325,6 +325,8 @@ Design notes:
 - **Asynchronous by nature.** The response is a placeholder repo while the import runs in
   Forgejo's task queue; the tool description tells the caller to poll `get_repo`. And it is a
   copy — the source is never touched, so retiring it stays a separate, deliberate act.
+  *(Wrong: the API migration runs within the request. Corrected in
+  [v0.24.0](#v0240--migrate_repo-sends-the-credential-where-each-importer-reads-it).)*
 
 **Credential.** `FORGEJO_MIGRATE_TOKEN` follows `FORGEJO_MIRROR_TOKEN`'s pattern — server
 environment, `Zeroizing`, never a tool argument — but is deliberately a *separate* variable
@@ -937,6 +939,60 @@ has a unit test only.
 Codeberg, with `service: gitea` and every content flag on, got an empty 500 and left an empty
 repository marked as migrating, which never finished and had to be deleted. The cause is
 unknown, and `migrate_repo` remains unverified. The repository was moved by `git push` instead.
+*(Found and fixed in
+[v0.24.0](#v0240--migrate_repo-sends-the-credential-where-each-importer-reads-it).)*
+
+### v0.24.0 — `migrate_repo` sends the credential where each importer reads it
+
+The failed migration of v0.23.0 was bisected live on 27 October 2026, gitea.com to Codeberg,
+in sixteen runs:
+
+| Source | `service` | Credential sent | Result |
+|---|---|---|---|
+| public | gitea | none | copied |
+| public or private | gitea | `auth_token`, all six content flags on or off | copied, issues and PRs intact |
+| public or private | gitea | `auth_username` + `auth_token`, even git data only | empty 500 |
+| private | git | `auth_username` + `auth_token` | 422 "Authentication failed" |
+| public or private | gitea | a revoked `auth_token` | empty 500 |
+
+Two bugs in how the token was sent, and one wrong assumption:
+
+- **A username made the token unused.** Forgejo's Gitea importer, given `auth_username`,
+  authenticates with it and `auth_password`, which we never sent. The source refused, and
+  Codeberg reported that as an empty 500. This was the original failure.
+- **A plain `git` clone never read `auth_token`.** Its URL is built from `auth_username` and
+  `auth_password` alone, so `service: git` could not authenticate at all.
+- **The migration is synchronous.** The API answers once the import has finished (five to ten
+  seconds for a small repository), not with a placeholder to poll.
+
+The token now goes where the service's importer reads it. For `git`, `onedev` and `codebase` it
+is `auth_password`, with `auth_username` (default `oauth2` for `git`, which Forgejo, Gitea and
+GitLab accept with a token; required for the other two). For `gitea`, `github`, `gitlab`,
+`gogs` and `gitbucket` it is `auth_token` alone, and `auth_username` is refused before
+anything is created, since it would make the importer ignore the token. That refusal is the
+breaking change.
+
+Every failure, the 500s and the 422 alike, left an empty repository under the target name,
+which blocks a retry and counts toward the account's repository limit (Codeberg's is 100, and
+the bisect hit it). `migrate_repo` now checks the name is free before it starts, so an existing
+repository is never mistaken for a leftover, and looks it up again after a failure to name it
+in the error. After a server error with a credential sent, the error also says the likeliest
+causes: a source repository that does not exist (also an empty 500), or a token the source
+refuses, whether revoked, out of scope, or limited to public repositories.
+
+Verified live the same day: a username with `service: gitea` and an existing target name are
+both refused with nothing created; `service: git` with the token clones the private source;
+`service: gitea` with every content flag carries the merged pull request across; and a missing
+source names the empty repository it left.
+
+**rmcp 3.4 to 3.8.** Three of its changes reach a stdio server. `ProtocolVersion::LATEST` is
+`2026-07-28` since 3.5, which `get_info` picks up through `Default`. Since 3.5.1 rmcp fills in
+missing cache hints for a `2026-07-28` peer, but with `ttlMs: 0` and `cacheScope: private`, so
+`list_tools` keeps its own hour, public. And 3.6 added `stdio_pipes`, which drives the pipes an
+MCP client launches the server with through Tokio's reactor on Linux, rather than handing every
+read and write to the blocking thread pool; on macOS, Windows, FreeBSD and for anything that is
+not a pipe it falls back to `stdio`. The rest (authorization, Streamable HTTP, client fixes)
+does not apply.
 
 ## Error handling
 
@@ -1113,6 +1169,9 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
 17. **v0.23.0** — `edit_issue`, `merge_pull_request`, `create_pull_request_review`,
     `delete_branch`, `create_or_update_file` and `delete_file`, with request paths encoded
     segment by segment. *(done; verified live on Codeberg and gitea.com)*
-18. Later — sort filters on the issue lists, slimming what still passes through raw
-    (`create_repo`, `create_branch`), binding the migrate and mirror credentials to their
-    hosts, and finding out why `migrate_repo` failed on Codeberg.
+18. **v0.24.0** — rmcp 3.8 and `stdio_pipes`; `migrate_repo` sends the credential where each importer reads it, refuses
+    a username for the token services, and names the empty repository a failure leaves.
+    *(done; verified live gitea.com → Codeberg)*
+19. Later — sort filters on the issue lists, slimming what still passes through raw
+    (`create_repo`, `create_branch`, `get_workflow_run`, `migrate_repo`), and binding the
+    migrate and mirror credentials to their hosts.

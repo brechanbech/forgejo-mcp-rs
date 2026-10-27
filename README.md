@@ -156,10 +156,13 @@ you're copying *from*.
 
 1. Mint a token on the **source** instance (its Settings → Applications), not on your own.
 2. Give it **read scopes only** — `read:repository`, plus `read:issue` if you're migrating
-   issues and PRs. It never needs write: the migration only reads from the source.
-3. Set it as `FORGEJO_MIGRATE_TOKEN` in the same `env` block as your other tokens.
-4. Call `migrate_repo` with `auth_username` set (or `authenticate: true` for token-only
-   forges like GitHub). Without one of those the token is not sent at all.
+   issues and PRs. It never needs write: the migration only reads from the source. On
+   Forgejo and Gitea, also set its repository access to all repositories, not public only,
+   or a private source stays out of its reach.
+3. Set it as `FORGEJO_MIGRATE_TOKEN` in the same `env` block as your other tokens, on the
+   server for the **destination** instance: that server asks the destination to do the
+   copying, and the destination presents the token to the source.
+4. Call `migrate_repo` with `authenticate: true`. Without it the token is not sent at all.
 
 > **Understand where this token goes before you set it.** Your read/write tokens travel as an
 > `Authorization` header to `FORGEJO_URL` and nowhere else. This one is different: it goes in
@@ -249,7 +252,7 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `write_status` | read | Report write-mode state (token configured? active? minutes left?) |
 | `enable_write_mode` / `disable_write_mode` |  | Enter/leave the time-boxed write mode |
 | `create_repo` | **write** | Create a repo (defaults to private) |
-| `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Async (poll `get_repo`); leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
+| `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Answers once the import has finished, and names any empty repository a failure left behind; leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
 | `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo that plainly exists as missing |
 | `create_branch` | **write** | Create a branch (owner/repo/new_branch, optional old_ref) |
 | `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
@@ -295,15 +298,20 @@ things to know:
   API-based importer that the metadata flags depend on.
 - **The content flags default to off.** `issues`, `pull_requests`, `labels`, `milestones`,
   `releases`, `wiki` and `lfs` are each opt-in, matching the API's own defaults.
-- **It's asynchronous, and it's a copy.** The call returns a repo record immediately while the
-  import runs in Forgejo's task queue, so poll `get_repo` to see it land. The source repository
-  is never modified — retiring it is a separate, deliberate step.
+- **It finishes within the call, and it's a copy.** The instance answers once the import is
+  done (seconds for a small repository on Codeberg). A failed import can leave an empty
+  repository under the new name, which blocks a retry; the error names it, and it has to be
+  deleted first. The source repository is never modified — retiring it is a separate,
+  deliberate step.
 
 Pass `mirror: true` to keep the result as a *pull* mirror that periodically re-fetches from the
 source, instead of taking a one-shot copy.
 
-For a private source, set `auth_username` (or `authenticate: true` for token-only forges) and the
-server sends `FORGEJO_MIGRATE_TOKEN` as the credential. As with push mirrors, the token is never
+For a private source, set `authenticate: true` and the server sends `FORGEJO_MIGRATE_TOKEN` as
+the credential: as a token for `gitea`, `github`, `gitlab`, `gogs` and `gitbucket`, and as the
+clone password for `git` (with `auth_username`, default `oauth2`), `onedev` and `codebase` (which
+need `auth_username`). A username is refused for the token services, because their importers
+then ignore the token and the migration fails. As with push mirrors, the token is never
 a tool argument, so it stays out of the conversation. See
 [Migration source token](#migration-source-token-optional) for how to mint and scope it — and
 for where it ends up, which is not where the other tokens go.
