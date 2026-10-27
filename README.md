@@ -243,7 +243,7 @@ Grouped by subject. The second column marks the tools that need write mode.
 | `search_repos` | read | Repository search by keyword |
 | `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
 | `create_repo` | **write** | Create a repo (defaults to private) |
-| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo that plainly exists as missing |
+| `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo as missing when it plainly exists |
 | `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 | `migrate_repo` | **write** | Copy a repo in from **another** instance — the only tool that carries issues/PRs across instances. Answers once the import has finished, and names any empty repository a failure left behind; leaves the source untouched; credential from `FORGEJO_MIGRATE_TOKEN` |
 
