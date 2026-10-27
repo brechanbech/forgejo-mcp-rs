@@ -8,6 +8,38 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [0.23.0] — 2026-10-27
+
+### Added
+- Six write tools, all behind write mode, for the steps an agent could not take
+  before: close what it fixed, merge what was approved, clean up after itself.
+  - `edit_issue` changes only the fields given: `state` (open/closed), `title`,
+    `body`, `assignees`, `milestone`, `due_date`, and `labels` by name. It
+    takes a pull request's number too, so it also closes a pull request
+    without merging it.
+  - `merge_pull_request` merges with a chosen `style`, an optional title and
+    message, `delete_branch`, and a `head_sha` guard that refuses the merge
+    when something was pushed after the caller looked. Forgejo and Gitea spell
+    the merge fields differently (`Do`/`MergeTitleField` against
+    `do`/`merge_title_field`), and each gets its own.
+  - `create_pull_request_review` approves, requests changes or comments.
+  - `delete_branch`.
+  - `create_or_update_file` and `delete_file` commit one file change each.
+    An update or a deletion takes the file's current `sha` and is refused
+    when it is stale. Content is UTF-8 text; the base64 is done here.
+- File paths and branch names are percent-encoded segment by segment, and an
+  empty, `.` or `..` segment is refused: request URLs are built by joining
+  onto the API root, which would resolve `..` into a different endpoint.
+
+### Fixed
+- `get_file_contents` read the wrong path for a file name with `#` in it, which
+  became a URL fragment. Paths are now encoded.
+- `delete_branch` on a branch that does not exist reported Codeberg's empty 500
+  or gitea.com's bare 404. It now says there was no such branch and nothing was
+  deleted.
+- `edit_issue` names any label the forge did not apply in `labels_not_found`;
+  both forges drop an unknown label name without an error.
+
 ## [0.22.1] — 2026-10-24
 
 ### Added

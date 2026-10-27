@@ -384,6 +384,7 @@ impl Forge {
 
     /// `GET /repos/{owner}/{repo}/contents/{path}` — file or directory metadata. For a file the
     /// object carries the body as base64 in `content`; `git_ref` selects a branch/tag/commit.
+    /// `path` must come from [`encode_repo_path`], or be empty for the repository root.
     pub async fn get_contents(
         &self,
         owner: &str,
@@ -394,8 +395,24 @@ impl Forge {
         let query: Vec<(&str, String)> = git_ref
             .map(|r| vec![("ref", r.to_owned())])
             .unwrap_or_default();
+        let endpoint = if path.is_empty() {
+            format!("repos/{owner}/{repo}/contents")
+        } else {
+            format!("repos/{owner}/{repo}/contents/{path}")
+        };
+        self.rest.get(&endpoint, &query).await
+    }
+
+    /// `GET /repos/{owner}/{repo}/branches/{branch}` — one branch. `branch` must come from
+    /// [`encode_repo_path`].
+    pub async fn get_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Value, ForgeError> {
         self.rest
-            .get(&format!("repos/{owner}/{repo}/contents/{path}"), &query)
+            .get(&format!("repos/{owner}/{repo}/branches/{branch}"), &[])
             .await
     }
 
@@ -653,6 +670,128 @@ impl Forge {
     /// `DELETE /repos/{owner}/{repo}` — delete a repository.
     pub async fn delete_repo(&self, owner: &str, repo: &str) -> Result<(), ForgeError> {
         self.rest.delete(&format!("repos/{owner}/{repo}")).await
+    }
+
+    /// `PATCH /repos/{owner}/{repo}/issues/{index}` — edit an issue (or a pull request's issue
+    /// half: title, body, state, assignees, milestone). The body is a partial `EditIssueOption`;
+    /// only the fields present change. Labels are not part of it — see
+    /// [`Forge::replace_issue_labels`].
+    pub async fn edit_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .patch(&format!("repos/{owner}/{repo}/issues/{index}"), body)
+            .await
+    }
+
+    /// `PUT /repos/{owner}/{repo}/issues/{index}/labels` — replace an issue's labels. Both forges
+    /// take label names as well as ids here; an empty list clears them.
+    pub async fn replace_issue_labels(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+        labels: &[String],
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .put(
+                &format!("repos/{owner}/{repo}/issues/{index}/labels"),
+                &serde_json::json!({ "labels": labels }),
+            )
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/pulls/{index}/merge` — merge a pull request. Both forges
+    /// answer an empty `200`, so the caller reads the pull request back. The body's keys differ
+    /// by flavor; see [`merge_body`].
+    pub async fn merge_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+        merge: &PullMerge<'_>,
+    ) -> Result<(), ForgeError> {
+        let body = merge_body(self.flavor().await, merge);
+        self.rest
+            .post(&format!("repos/{owner}/{repo}/pulls/{index}/merge"), &body)
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /repos/{owner}/{repo}/pulls/{index}/reviews` — submit a review. The body is a
+    /// `CreatePullReviewOptions`; the response is the new `PullReview`.
+    pub async fn create_pull_request_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        index: i64,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .post(&format!("repos/{owner}/{repo}/pulls/{index}/reviews"), body)
+            .await
+    }
+
+    /// `DELETE /repos/{owner}/{repo}/branches/{branch}` — delete a branch. `branch` must come
+    /// from [`encode_repo_path`]: a branch name may hold `/` and `#`.
+    pub async fn delete_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<(), ForgeError> {
+        self.rest
+            .delete(&format!("repos/{owner}/{repo}/branches/{branch}"))
+            .await
+    }
+
+    /// `POST /repos/{owner}/{repo}/contents/{path}` — create a file, as a commit. The body is a
+    /// `CreateFileOptions` with base64 `content`; the response is a `FileResponse`. `path` must
+    /// come from [`encode_repo_path`].
+    pub async fn create_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .post(&format!("repos/{owner}/{repo}/contents/{path}"), body)
+            .await
+    }
+
+    /// `PUT /repos/{owner}/{repo}/contents/{path}` — replace a file's content, as a commit. The
+    /// body is an `UpdateFileOptions`, whose `sha` must be the blob being replaced. `path` must
+    /// come from [`encode_repo_path`].
+    pub async fn update_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .put(&format!("repos/{owner}/{repo}/contents/{path}"), body)
+            .await
+    }
+
+    /// `DELETE /repos/{owner}/{repo}/contents/{path}` — remove a file, as a commit. The body is
+    /// a `DeleteFileOptions` carrying the blob `sha`. `path` must come from
+    /// [`encode_repo_path`].
+    pub async fn delete_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, ForgeError> {
+        self.rest
+            .delete_with_body(&format!("repos/{owner}/{repo}/contents/{path}"), body)
+            .await
     }
 
     // --- releases (and their downloadable assets) ---
@@ -987,6 +1126,95 @@ pub struct PullFilters<'a> {
     pub head: Option<&'a str>,
 }
 
+/// How to merge a pull request, before it is spelled the way this instance's flavor expects.
+#[derive(Debug, Clone, Copy)]
+pub struct PullMerge<'a> {
+    /// `merge`, `rebase`, `rebase-merge`, `squash` or `fast-forward-only`.
+    pub style: &'a str,
+    /// Merge commit title; the forge composes one when absent.
+    pub title: Option<&'a str>,
+    /// Merge commit message body.
+    pub message: Option<&'a str>,
+    /// Delete the head branch once merged.
+    pub delete_branch: Option<bool>,
+    /// Refuse the merge unless the pull request's head is still this commit.
+    pub head_sha: Option<&'a str>,
+}
+
+/// Builds a merge request's body, per flavor.
+///
+/// | field | Forgejo | Gitea |
+/// |---|---|---|
+/// | style | `Do` | `do` |
+/// | title | `MergeTitleField` | `merge_title_field` |
+/// | message | `MergeMessageField` | `merge_message_field` |
+/// | `delete_branch_after_merge`, `head_commit_id` | same | same |
+///
+/// From the two published `OpenAPI` specs, 25 October 2026. Forgejo kept the Go field names
+/// that both forges once shared, and Gitea has since given them JSON names. Go's decoder matches
+/// keys case-insensitively, which would forgive `Do`/`do`, but not `MergeTitleField` against
+/// `merge_title_field`: a title sent in the wrong spelling would be dropped without an error.
+fn merge_body(flavor: Flavor, merge: &PullMerge<'_>) -> Value {
+    let (style, title, message) = match flavor {
+        Flavor::Forgejo => ("Do", "MergeTitleField", "MergeMessageField"),
+        Flavor::Gitea => ("do", "merge_title_field", "merge_message_field"),
+    };
+    let mut body = serde_json::Map::new();
+    body.insert(style.to_owned(), Value::String(merge.style.to_owned()));
+    if let Some(t) = merge.title {
+        body.insert(title.to_owned(), Value::String(t.to_owned()));
+    }
+    if let Some(m) = merge.message {
+        body.insert(message.to_owned(), Value::String(m.to_owned()));
+    }
+    if let Some(d) = merge.delete_branch {
+        body.insert("delete_branch_after_merge".to_owned(), Value::Bool(d));
+    }
+    if let Some(sha) = merge.head_sha {
+        body.insert("head_commit_id".to_owned(), Value::String(sha.to_owned()));
+    }
+    Value::Object(body)
+}
+
+/// Percent-encodes a repository path (a file path, or a branch name) for use in a request URL,
+/// one `/`-separated segment at a time, and refuses one that could leave the endpoint.
+///
+/// Request URLs are built with `Url::join`, which resolves `.` and `..` segments — so a file
+/// path of `../../../user` would address a different API endpoint entirely, with the write
+/// token. `?` and `#` would likewise cut the path short into a query or fragment. Every byte but
+/// the unreserved set is escaped, and empty, `.` and `..` segments are refused outright.
+///
+/// # Errors
+/// A message naming what is wrong with `path`, for the caller.
+pub fn encode_repo_path(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("the path is empty".to_owned());
+    }
+    let mut encoded = String::with_capacity(path.len());
+    for (i, segment) in path.split('/').enumerate() {
+        if matches!(segment, "" | "." | "..") {
+            return Err(format!(
+                "`{path}` has an empty, `.` or `..` segment; give a path relative to the \
+                 repository root, without a leading or trailing `/`"
+            ));
+        }
+        if i > 0 {
+            encoded.push('/');
+        }
+        for byte in segment.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                encoded.push(char::from(byte));
+            } else {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                encoded.push('%');
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+            }
+        }
+    }
+    Ok(encoded)
+}
+
 /// Builds the query for a pull-request listing, per flavor.
 ///
 /// | filter | Forgejo 16+ | Gitea |
@@ -1117,6 +1345,104 @@ fn dispatch_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_paths_keep_their_slashes_and_escape_the_rest() {
+        assert_eq!(encode_repo_path("docs/setup.md").unwrap(), "docs/setup.md");
+        assert_eq!(encode_repo_path("feature/login").unwrap(), "feature/login");
+        assert_eq!(
+            encode_repo_path("notes/a b#1?.md").unwrap(),
+            "notes/a%20b%231%3F.md"
+        );
+        assert_eq!(encode_repo_path("Ä.txt").unwrap(), "%C3%84.txt");
+        assert_eq!(encode_repo_path("100%.md").unwrap(), "100%25.md");
+        assert_eq!(encode_repo_path("...md").unwrap(), "...md");
+    }
+
+    #[test]
+    fn repo_paths_that_could_leave_the_endpoint_are_refused() {
+        for path in [
+            "",
+            "/etc",
+            "docs/",
+            "a//b",
+            ".",
+            "..",
+            "../../user",
+            "docs/../../x",
+            "./x",
+        ] {
+            assert!(encode_repo_path(path).is_err(), "{path:?} was accepted");
+        }
+    }
+
+    /// The point of the encoding: whatever the caller's path, the joined URL stays under the
+    /// contents endpoint of the repository it names.
+    #[test]
+    fn an_encoded_path_joins_under_the_endpoint() {
+        let root = Url::parse("https://codeberg.org/api/v1/").unwrap();
+        for path in [
+            "a b/c#d?e.md",
+            "..x/y",
+            "%2e%2e/%2e%2e/user",
+            "a\\..\\..\\b",
+        ] {
+            let encoded = encode_repo_path(path).unwrap();
+            let url = root.join(&format!("repos/o/r/contents/{encoded}")).unwrap();
+            assert!(
+                url.path().starts_with("/api/v1/repos/o/r/contents/"),
+                "{path:?} -> {url}"
+            );
+            assert_eq!(url.query(), None, "{path:?}");
+            assert_eq!(url.fragment(), None, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn merge_body_uses_each_flavors_own_spelling() {
+        let merge = PullMerge {
+            style: "squash",
+            title: Some("t"),
+            message: Some("m"),
+            delete_branch: Some(true),
+            head_sha: Some("abc"),
+        };
+        assert_eq!(
+            merge_body(Flavor::Forgejo, &merge),
+            serde_json::json!({
+                "Do": "squash",
+                "MergeTitleField": "t",
+                "MergeMessageField": "m",
+                "delete_branch_after_merge": true,
+                "head_commit_id": "abc",
+            })
+        );
+        assert_eq!(
+            merge_body(Flavor::Gitea, &merge),
+            serde_json::json!({
+                "do": "squash",
+                "merge_title_field": "t",
+                "merge_message_field": "m",
+                "delete_branch_after_merge": true,
+                "head_commit_id": "abc",
+            })
+        );
+    }
+
+    #[test]
+    fn merge_body_sends_only_what_was_asked() {
+        let merge = PullMerge {
+            style: "merge",
+            title: None,
+            message: None,
+            delete_branch: None,
+            head_sha: None,
+        };
+        assert_eq!(
+            merge_body(Flavor::Forgejo, &merge),
+            serde_json::json!({ "Do": "merge" })
+        );
+    }
 
     /// Real `GET /version` strings, read off both live instances on 24 October 2026.
     const CODEBERG: &str = "16.0.0-dev-785-465b60ef+gitea-1.22.0";

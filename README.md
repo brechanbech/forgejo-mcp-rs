@@ -11,8 +11,9 @@ Forgejo/Gitea REST API.
 > Status: **read-only by default, with opt-in guarded writes (since v0.2).** Read tools across
 > the forge — user, repos, issues, pull requests, search, orgs, notifications, comments,
 > reviews, and Actions (CI) runs — plus guarded writes (`create_repo`, `edit_repo`,
-> `create_branch`, `create_issue`, `create_pull_request`, `comment_on_issue`, `delete_repo`,
-> `migrate_repo`, push-mirror
+> `create_branch`, `delete_branch`, `create_issue`, `edit_issue`, `comment_on_issue`,
+> `create_pull_request`, `create_pull_request_review`, `merge_pull_request`,
+> `create_or_update_file`, `delete_file`, `delete_repo`, `migrate_repo`, push-mirror
 > management, `dispatch_workflow`, `cancel_workflow_run` and `rerun_workflow`) gated behind a separate write token and a deliberate,
 > time-boxed **write mode**. See [`SPECIFICATION.md`](SPECIFICATION.md) for the full design.
 
@@ -254,6 +255,12 @@ Logs go to **stderr** (stdout is the MCP transport); control verbosity with `RUS
 | `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
 | `create_pull_request` | **write** | Open a PR (owner/repo/title/head/base, optional body) |
 | `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |
+| `edit_issue` | **write** | Edit an issue in place (owner/repo/index): `state` open/closed, `title`, `body`, `assignees`, `milestone`, `due_date`, `labels` (names). Only what is passed changes; works on a pull request's number too, so `state: closed` closes a PR unmerged |
+| `create_pull_request_review` | **write** | Review a PR (owner/repo/index/verdict): `approve`, `request_changes` or `comment`, with a summary `body` and optional `commit_id` |
+| `merge_pull_request` | **write** | Merge a PR (owner/repo/index): `style` merge/rebase/rebase-merge/squash/fast-forward-only, optional title/message, `delete_branch`, and a `head_sha` guard that refuses the merge if the head moved. Answers with the PR as it now stands |
+| `delete_branch` | **write** | Delete a branch (owner/repo/branch). The forge refuses the default and protected branches |
+| `create_or_update_file` | **write** | Create a file, or replace its content, as one commit (owner/repo/path/content as UTF-8 text). Pass the current `sha` from `get_file_contents` to update; a stale one is refused. Optional `message`, `branch`, `new_branch` |
+| `delete_file` | **write** | Delete a file as one commit (owner/repo/path/sha). Optional `message`, `branch`, `new_branch` |
 | `delete_repo` | **write** | Delete a repo (needs `confirm = "owner/repo"`) |
 | `add_push_mirror` | **write** | Auto-push a repo to an external remote (e.g. a GitHub mirror); credential from `FORGEJO_MIRROR_TOKEN` or `use_ssh=true` |
 | `list_push_mirrors` | **write** | List a repo's push mirrors (admin-scoped; secrets never returned) |

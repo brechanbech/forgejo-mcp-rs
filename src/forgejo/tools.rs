@@ -20,7 +20,9 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::client::{Flavor, Forge, ForgeError, PullFilters, RunFilters};
+use super::client::{
+    Flavor, Forge, ForgeError, PullFilters, PullMerge, RunFilters, encode_repo_path,
+};
 
 /// Returns the authenticated user — proof the token works.
 pub async fn whoami(forge: &Forge) -> Result<CallToolResult, McpError> {
@@ -1070,11 +1072,19 @@ pub async fn get_file_contents(
     forge: &Forge,
     params: FileContentsParams,
 ) -> Result<CallToolResult, McpError> {
+    // `/` and the empty path both mean the repository root; anything else is encoded, since
+    // a `#` or `?` in a file name would otherwise cut the request path short.
+    let trimmed = params.path.trim_matches('/');
+    let path = if trimmed.is_empty() {
+        String::new()
+    } else {
+        repo_path_param("path", trimmed)?
+    };
     let raw = forge
         .get_contents(
             &params.owner,
             &params.repo,
-            &params.path,
+            &path,
             params.git_ref.as_deref(),
         )
         .await
@@ -2615,6 +2625,496 @@ pub async fn comment_on_issue(
     json_result(&summarize_comment(comment))
 }
 
+/// Parameters for the `edit_issue` tool.
+///
+/// Everything but the issue's address is optional, and only what the caller gives is sent, so
+/// closing an issue is `state: "closed"` and nothing else.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct EditIssueParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue or pull-request number.
+    pub index: i64,
+    /// New title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// New body (Markdown). Replaces the existing body wholesale.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// `open` or `closed`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Logins to assign, replacing the current assignees. An empty list unassigns everyone.
+    #[serde(default)]
+    pub assignees: Option<Vec<String>>,
+    /// Milestone id to set; `0` removes the milestone.
+    #[serde(default)]
+    pub milestone: Option<i64>,
+    /// Due date as RFC 3339 (e.g. `2026-11-30T00:00:00Z`); an empty string removes it.
+    #[serde(default)]
+    pub due_date: Option<String>,
+    /// Label names, replacing the current labels. An empty list removes them all.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+}
+
+/// Builds the `EditIssueOption` body: only the fields the caller gave. Labels are not part of it;
+/// they go through their own endpoint.
+fn edit_issue_body(params: &EditIssueParams) -> Result<serde_json::Map<String, Value>, McpError> {
+    let mut body = serde_json::Map::new();
+    if let Some(title) = &params.title {
+        body.insert("title".to_owned(), Value::String(title.clone()));
+    }
+    if let Some(text) = &params.body {
+        body.insert("body".to_owned(), Value::String(text.clone()));
+    }
+    if let Some(state) = &params.state {
+        if !matches!(state.as_str(), "open" | "closed") {
+            return Err(McpError::invalid_params(
+                format!("state must be `open` or `closed`, not {state:?}"),
+                None,
+            ));
+        }
+        body.insert("state".to_owned(), Value::String(state.clone()));
+    }
+    if let Some(assignees) = &params.assignees {
+        body.insert("assignees".to_owned(), serde_json::json!(assignees));
+    }
+    if let Some(milestone) = params.milestone {
+        body.insert("milestone".to_owned(), Value::from(milestone));
+    }
+    match params.due_date.as_deref() {
+        Some("") => {
+            body.insert("unset_due_date".to_owned(), Value::Bool(true));
+        }
+        Some(due) => {
+            body.insert("due_date".to_owned(), Value::String(due.to_owned()));
+        }
+        None => {}
+    }
+    Ok(body)
+}
+
+/// The requested label names the forge did not apply — the ones missing from the label list its
+/// labels endpoint answers with.
+///
+/// Codeberg drops a label name the repository has no label for, without an error, and answers
+/// `200` with the labels it did apply (25 October 2026). Left there, a caller setting `bug` on a
+/// repository whose label is `Kind/Bug` would be told it worked.
+fn labels_not_applied(requested: &[String], applied: &Value) -> Vec<String> {
+    let applied: Vec<&str> = applied
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|l| l.get("name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    requested
+        .iter()
+        .filter(|name| !applied.contains(&name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// `edit_issue`'s answer: the issue in `get_issue`'s shape, plus any label names the forge did
+/// not apply.
+#[derive(Debug, Serialize)]
+struct EditedIssue {
+    #[serde(flatten)]
+    issue: IssueDetail,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels_not_found: Vec<String>,
+}
+
+/// Edits an issue, or the issue half of a pull request, in place. Labels, when given, are
+/// replaced through their own endpoint after the edit, and the issue is then read back so the
+/// answer shows them; any the forge did not apply are named in `labels_not_found`.
+pub async fn edit_issue(
+    forge: &Forge,
+    params: EditIssueParams,
+) -> Result<CallToolResult, McpError> {
+    let body = edit_issue_body(&params)?;
+    if body.is_empty() && params.labels.is_none() {
+        return Err(McpError::invalid_params(
+            "nothing to change: pass at least one of title, body, state, assignees, milestone, \
+             due_date or labels"
+                .to_owned(),
+            None,
+        ));
+    }
+    let mut issue = Value::Null;
+    if !body.is_empty() {
+        issue = forge
+            .edit_issue(
+                &params.owner,
+                &params.repo,
+                params.index,
+                &Value::Object(body),
+            )
+            .await
+            .map_err(to_mcp)?;
+    }
+    let mut labels_not_found = Vec::new();
+    if let Some(labels) = &params.labels {
+        let applied = forge
+            .replace_issue_labels(&params.owner, &params.repo, params.index, labels)
+            .await
+            .map_err(to_mcp)?;
+        labels_not_found = labels_not_applied(labels, &applied);
+        issue = forge
+            .get_issue(&params.owner, &params.repo, params.index)
+            .await
+            .map_err(to_mcp)?;
+    }
+    json_result(&EditedIssue {
+        issue: issue_detail(&issue),
+        labels_not_found,
+    })
+}
+
+/// The merge styles both forges accept. `manually-merged`, which marks a pull request merged
+/// without merging anything, is left out on purpose.
+const MERGE_STYLES: [&str; 5] = [
+    "merge",
+    "rebase",
+    "rebase-merge",
+    "squash",
+    "fast-forward-only",
+];
+
+/// Parameters for the `merge_pull_request` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct MergePullRequestParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull-request number.
+    pub index: i64,
+    /// `merge` (the default), `rebase`, `rebase-merge`, `squash` or `fast-forward-only`. The
+    /// repository's settings may allow only some of them.
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Merge commit title. The forge composes one when absent.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Merge commit message body.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Delete the head branch after merging. Defaults to the repository's own setting.
+    #[serde(default)]
+    pub delete_branch: Option<bool>,
+    /// Merge only if the pull request's head is still this commit (the full SHA, from
+    /// `get_pull_request`'s `head_sha`). Guards against merging something pushed after review.
+    #[serde(default)]
+    pub head_sha: Option<String>,
+}
+
+/// Merges a pull request, then reads it back: both forges answer the merge itself with an empty
+/// `200`, so the pull request as it now stands is the useful answer.
+pub async fn merge_pull_request(
+    forge: &Forge,
+    params: MergePullRequestParams,
+) -> Result<CallToolResult, McpError> {
+    let style = params.style.as_deref().unwrap_or("merge");
+    if !MERGE_STYLES.contains(&style) {
+        return Err(McpError::invalid_params(
+            format!(
+                "style must be one of {}, not {style:?}",
+                MERGE_STYLES.join(", ")
+            ),
+            None,
+        ));
+    }
+    let head_sha = params.head_sha.as_deref().map(full_sha).transpose()?;
+    let merge = PullMerge {
+        style,
+        title: params.title.as_deref(),
+        message: params.message.as_deref(),
+        delete_branch: params.delete_branch,
+        head_sha: head_sha.as_deref(),
+    };
+    forge
+        .merge_pull_request(&params.owner, &params.repo, params.index, &merge)
+        .await
+        .map_err(to_mcp)?;
+    let pull = forge
+        .get_pull_request(&params.owner, &params.repo, params.index)
+        .await
+        .map_err(to_mcp)?;
+    json_result(&pull_detail(&pull))
+}
+
+/// Parameters for the `create_pull_request_review` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CreatePullRequestReviewParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull-request number.
+    pub index: i64,
+    /// `approve`, `request_changes` or `comment`.
+    pub verdict: String,
+    /// The review's summary text (Markdown). The forge requires it for `request_changes` and
+    /// `comment`.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// The commit the review is of (full SHA). Defaults to the pull request's current head.
+    #[serde(default)]
+    pub commit_id: Option<String>,
+}
+
+/// Submits a review verdict on a pull request.
+pub async fn create_pull_request_review(
+    forge: &Forge,
+    params: CreatePullRequestReviewParams,
+) -> Result<CallToolResult, McpError> {
+    let event = match params.verdict.as_str() {
+        "approve" => "APPROVED",
+        "request_changes" => "REQUEST_CHANGES",
+        "comment" => "COMMENT",
+        other => {
+            return Err(McpError::invalid_params(
+                format!("verdict must be `approve`, `request_changes` or `comment`, not {other:?}"),
+                None,
+            ));
+        }
+    };
+    let mut body = serde_json::Map::new();
+    body.insert("event".to_owned(), Value::String(event.to_owned()));
+    if let Some(text) = params.body {
+        body.insert("body".to_owned(), Value::String(text));
+    }
+    if let Some(commit) = params.commit_id.as_deref() {
+        body.insert("commit_id".to_owned(), Value::String(full_sha(commit)?));
+    }
+    let raw = forge
+        .create_pull_request_review(
+            &params.owner,
+            &params.repo,
+            params.index,
+            &Value::Object(body),
+        )
+        .await
+        .map_err(to_mcp)?;
+    let review: RawReview = decode(raw)?;
+    json_result(&summarize_review(review))
+}
+
+/// Encodes a caller's repository path for a request URL, refusing one that could leave the
+/// endpoint (see [`encode_repo_path`]).
+fn repo_path_param(name: &str, path: &str) -> Result<String, McpError> {
+    encode_repo_path(path).map_err(|e| McpError::invalid_params(format!("{name}: {e}"), None))
+}
+
+/// Parameters for the `delete_branch` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct DeleteBranchParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Branch to delete, e.g. `feature/login`.
+    pub branch: String,
+}
+
+/// Deletes a branch. The forges refuse the default branch and protected ones.
+///
+/// Codeberg answers the delete of a branch that does not exist with an empty `500`, not a
+/// `404` — for a name that never existed and for one already deleted alike (25 October 2026).
+/// A server error would tell the caller something broke and might be worth retrying, so after
+/// one the branch is looked up, and a missing one is reported as what it is. Gitea answers a
+/// plain `404 not found`, which reads the same for a missing repository, so that gets the
+/// same lookup and the same message.
+pub async fn delete_branch(
+    forge: &Forge,
+    params: DeleteBranchParams,
+) -> Result<CallToolResult, McpError> {
+    let branch = repo_path_param("branch", &params.branch)?;
+    match forge
+        .delete_branch(&params.owner, &params.repo, &branch)
+        .await
+    {
+        Ok(()) => {}
+        Err(ForgeError::Status { code, .. })
+            if (code.is_server_error() || code == StatusCode::NOT_FOUND)
+                && matches!(
+                    forge.get_branch(&params.owner, &params.repo, &branch).await,
+                    Err(ForgeError::Status {
+                        code: StatusCode::NOT_FOUND,
+                        ..
+                    })
+                ) =>
+        {
+            return Err(McpError::invalid_params(
+                format!(
+                    "no branch `{}` in {}/{}, so nothing was deleted",
+                    params.branch, params.owner, params.repo
+                ),
+                None,
+            ));
+        }
+        Err(e) => return Err(to_mcp(e)),
+    }
+    json_result(&serde_json::json!({ "deleted": true, "branch": params.branch }))
+}
+
+/// The commit a file change made, and the file as it now stands — from a `FileResponse` or
+/// `FileDeleteResponse`, which otherwise carry the file's base64 body, its three URLs and the
+/// commit's full author, committer, tree and parents.
+fn file_change_result(raw: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for (key, pointer) in [
+        ("path", "/content/path"),
+        ("sha", "/content/sha"),
+        ("html_url", "/content/html_url"),
+    ] {
+        if let Some(v) = text_at(raw, pointer) {
+            out.insert(key.to_owned(), Value::String(v));
+        }
+    }
+    let mut commit = serde_json::Map::new();
+    for (key, pointer) in [
+        ("sha", "/commit/sha"),
+        ("message", "/commit/message"),
+        ("html_url", "/commit/html_url"),
+    ] {
+        if let Some(v) = text_at(raw, pointer) {
+            commit.insert(key.to_owned(), Value::String(v));
+        }
+    }
+    out.insert("commit".to_owned(), Value::Object(commit));
+    Value::Object(out)
+}
+
+/// The commit placement every file change shares: message, branch, and a new branch to commit
+/// to instead.
+fn file_commit_fields(
+    body: &mut serde_json::Map<String, Value>,
+    message: Option<String>,
+    branch: Option<String>,
+    new_branch: Option<String>,
+) {
+    for (key, value) in [
+        ("message", message),
+        ("branch", branch),
+        ("new_branch", new_branch),
+    ] {
+        if let Some(value) = value {
+            body.insert(key.to_owned(), Value::String(value));
+        }
+    }
+}
+
+/// Parameters for the `create_or_update_file` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct CreateOrUpdateFileParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// File path from the repository root, e.g. `docs/setup.md`.
+    pub path: String,
+    /// The whole new content, as UTF-8 text.
+    pub content: String,
+    /// To update an existing file: its current blob SHA, from `get_file_contents`. Omit it to
+    /// create a new file. A stale SHA is refused, so a change made meanwhile is not overwritten.
+    #[serde(default)]
+    pub sha: Option<String>,
+    /// Commit message. The forge composes one when absent.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Branch to commit to. Defaults to the repository's default branch.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Create this branch from `branch` and commit there instead — the way to propose a change
+    /// as a pull request.
+    #[serde(default)]
+    pub new_branch: Option<String>,
+}
+
+/// Creates a file, or replaces one's content, as a single commit.
+pub async fn create_or_update_file(
+    forge: &Forge,
+    params: CreateOrUpdateFileParams,
+) -> Result<CallToolResult, McpError> {
+    let path = repo_path_param("path", &params.path)?;
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "content".to_owned(),
+        Value::String(BASE64.encode(params.content.as_bytes())),
+    );
+    file_commit_fields(&mut body, params.message, params.branch, params.new_branch);
+    let created = params.sha.is_none();
+    let raw = match params.sha {
+        Some(sha) => {
+            body.insert("sha".to_owned(), Value::String(sha));
+            forge
+                .update_file(&params.owner, &params.repo, &path, &Value::Object(body))
+                .await
+        }
+        None => {
+            forge
+                .create_file(&params.owner, &params.repo, &path, &Value::Object(body))
+                .await
+        }
+    }
+    .map_err(to_mcp)?;
+    let mut result = file_change_result(&raw);
+    if let Value::Object(out) = &mut result {
+        out.insert("created".to_owned(), Value::Bool(created));
+    }
+    json_result(&result)
+}
+
+/// Parameters for the `delete_file` tool.
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct DeleteFileParams {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// File path from the repository root.
+    pub path: String,
+    /// The file's current blob SHA, from `get_file_contents`.
+    pub sha: String,
+    /// Commit message. The forge composes one when absent.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Branch to commit to. Defaults to the repository's default branch.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Create this branch from `branch` and commit the deletion there instead.
+    #[serde(default)]
+    pub new_branch: Option<String>,
+}
+
+/// Deletes a file, as a single commit.
+pub async fn delete_file(
+    forge: &Forge,
+    params: DeleteFileParams,
+) -> Result<CallToolResult, McpError> {
+    let path = repo_path_param("path", &params.path)?;
+    let mut body = serde_json::Map::new();
+    body.insert("sha".to_owned(), Value::String(params.sha));
+    file_commit_fields(&mut body, params.message, params.branch, params.new_branch);
+    let raw = forge
+        .delete_file(&params.owner, &params.repo, &path, &Value::Object(body))
+        .await
+        .map_err(to_mcp)?;
+    let mut result = file_change_result(&raw);
+    if let Value::Object(out) = &mut result {
+        out.insert("deleted".to_owned(), Value::Bool(true));
+        out.insert("path".to_owned(), Value::String(params.path));
+    }
+    json_result(&result)
+}
+
 /// Default push-mirror sync interval (Forgejo duration syntax) when the caller omits one.
 const DEFAULT_MIRROR_INTERVAL: &str = "8h0m0s";
 
@@ -3471,8 +3971,8 @@ fn full_sha(sha: &str) -> Result<String, McpError> {
         Err(McpError::invalid_params(
             format!(
                 "head_sha must be a full commit SHA (40 hex characters, or 64 for a SHA-256 \
-                 repository), not {sha:?}: the forge matches it exactly, so an abbreviated SHA \
-                 finds nothing. Expand it with `git rev-parse` or get_commit."
+                 repository), not {sha:?}: the forge compares it exactly, so an abbreviated \
+                 SHA never matches. Expand it with `git rev-parse` or get_commit."
             ),
             None,
         ))
@@ -4211,6 +4711,151 @@ pub async fn rerun_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tool parameters addressing item 1 of `o/r`, plus the `extra` fields given.
+    fn item_params<T: serde::de::DeserializeOwned>(extra: Value) -> T {
+        let mut base = serde_json::json!({ "owner": "o", "repo": "r", "index": 1 });
+        if let (Value::Object(base), Value::Object(extra)) = (&mut base, extra) {
+            base.extend(extra);
+        }
+        serde_json::from_value(base).unwrap()
+    }
+
+    fn edit_params(extra: Value) -> EditIssueParams {
+        item_params(extra)
+    }
+
+    #[test]
+    fn edit_issue_sends_only_the_fields_given() {
+        let body = edit_issue_body(&edit_params(serde_json::json!({ "state": "closed" }))).unwrap();
+        assert_eq!(
+            Value::Object(body),
+            serde_json::json!({ "state": "closed" })
+        );
+
+        let body = edit_issue_body(&edit_params(serde_json::json!({
+            "title": "t", "assignees": [], "milestone": 0, "due_date": "2026-11-30T00:00:00Z",
+        })))
+        .unwrap();
+        assert_eq!(
+            Value::Object(body),
+            serde_json::json!({
+                "title": "t", "assignees": [], "milestone": 0,
+                "due_date": "2026-11-30T00:00:00Z",
+            })
+        );
+    }
+
+    #[test]
+    fn edit_issue_clears_a_due_date_with_its_own_flag() {
+        let body = edit_issue_body(&edit_params(serde_json::json!({ "due_date": "" }))).unwrap();
+        assert_eq!(
+            Value::Object(body),
+            serde_json::json!({ "unset_due_date": true })
+        );
+    }
+
+    #[test]
+    fn labels_the_forge_did_not_apply_are_named() {
+        let requested = vec!["bug".to_owned(), "Kind/Docs".to_owned()];
+        let applied = serde_json::json!([{ "id": 7, "name": "Kind/Docs", "color": "aaaaaa" }]);
+        assert_eq!(labels_not_applied(&requested, &applied), ["bug"]);
+        // Codeberg's answer when none matched.
+        assert_eq!(
+            labels_not_applied(&requested, &serde_json::json!([])),
+            ["bug", "Kind/Docs"]
+        );
+        assert_eq!(
+            labels_not_applied(&[], &serde_json::json!([])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn edit_issue_refuses_an_unknown_state() {
+        assert!(edit_issue_body(&edit_params(serde_json::json!({ "state": "merged" }))).is_err());
+    }
+
+    /// Labels travel separately, so a labels-only edit has an empty PATCH body — which must not
+    /// be mistaken for "nothing to change".
+    #[test]
+    fn a_labels_only_edit_has_no_patch_body() {
+        let params = edit_params(serde_json::json!({ "labels": ["bug"] }));
+        assert!(edit_issue_body(&params).unwrap().is_empty());
+        assert!(params.labels.is_some());
+    }
+
+    #[tokio::test]
+    async fn merge_refuses_an_unknown_style_and_a_short_head_sha_before_any_request() {
+        // An unreachable instance: reaching the network would fail differently.
+        let url = url::Url::parse("https://example.invalid").unwrap();
+        let forge = Forge::new(&url, "t").unwrap();
+        let params = item_params::<MergePullRequestParams>;
+        let err = merge_pull_request(&forge, params(serde_json::json!({ "style": "octopus" })))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("style must be one of"),
+            "{}",
+            err.message
+        );
+        let err = merge_pull_request(&forge, params(serde_json::json!({ "head_sha": "1948f50" })))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("full commit SHA"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn file_writes_refuse_a_path_that_leaves_the_repository() {
+        let url = url::Url::parse("https://example.invalid").unwrap();
+        let forge = Forge::new(&url, "t").unwrap();
+        let params: CreateOrUpdateFileParams = serde_json::from_value(serde_json::json!({
+            "owner": "o", "repo": "r", "path": "../../../user", "content": "x",
+        }))
+        .unwrap();
+        let err = create_or_update_file(&forge, params).await.unwrap_err();
+        assert!(err.message.starts_with("path:"), "{}", err.message);
+    }
+
+    /// A `FileResponse` as Codeberg shapes it, cut down: the file's base64 body and the commit's
+    /// people and tree are what the slimming drops.
+    #[test]
+    fn a_file_change_keeps_the_new_sha_and_the_commit() {
+        let raw = serde_json::json!({
+            "content": {
+                "path": "docs/a.md", "sha": "b10b", "html_url": "https://x/docs/a.md",
+                "content": "aGVsbG8=", "encoding": "base64", "size": 5,
+            },
+            "commit": {
+                "sha": "c0mm17", "message": "Add docs/a.md\n", "html_url": "https://x/commit/c0mm17",
+                "author": { "name": "n", "email": "e" }, "tree": { "sha": "7ree" }, "parents": [],
+            },
+            "verification": { "verified": false },
+        });
+        assert_eq!(
+            file_change_result(&raw),
+            serde_json::json!({
+                "path": "docs/a.md", "sha": "b10b", "html_url": "https://x/docs/a.md",
+                "commit": {
+                    "sha": "c0mm17", "message": "Add docs/a.md\n",
+                    "html_url": "https://x/commit/c0mm17",
+                },
+            })
+        );
+    }
+
+    /// A deletion's `content` is null, so only the commit remains.
+    #[test]
+    fn a_file_deletion_reports_only_the_commit() {
+        let raw = serde_json::json!({
+            "content": null,
+            "commit": { "sha": "c0mm17", "message": "Delete a.md\n" },
+        });
+        assert_eq!(
+            file_change_result(&raw),
+            serde_json::json!({ "commit": { "sha": "c0mm17", "message": "Delete a.md\n" } })
+        );
+    }
 
     /// A scratch directory under the system temp dir, removed when the guard drops. Each upload
     /// test needs a real tree on disk: the guard resolves symlinks and `..` through the actual

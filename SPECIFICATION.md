@@ -887,6 +887,57 @@ the top-level field (before protocol `2025-06-18`) look for it. Two tests hold t
 fails on a tool missing its title or any hint its kind needs, and one pins the destructive set,
 so a new tool has to decide where it belongs.
 
+### v0.23.0 — closing, merging, reviewing, and single-file commits
+
+An agent could open an issue, a branch and a pull request, but not finish any of them: no
+closing what it fixed, no merging what was approved, no removing the branch afterwards, and
+no changing a file without a local clone. Six write tools fill that in, all behind write mode:
+
+| Tool | Request | Hints |
+|---|---|---|
+| `edit_issue` | `PATCH …/issues/{n}`, then `PUT …/issues/{n}/labels` by name | destructive, idempotent |
+| `merge_pull_request` | `POST …/pulls/{n}/merge` | destructive, idempotent |
+| `create_pull_request_review` | `POST …/pulls/{n}/reviews` | neither |
+| `delete_branch` | `DELETE …/branches/{b}` | destructive, idempotent |
+| `create_or_update_file` | `POST` (create) or `PUT` (update) `…/contents/{path}` | destructive |
+| `delete_file` | `DELETE …/contents/{path}`, with a body | destructive, idempotent |
+
+Design notes:
+
+- **Guards against overwriting unseen work.** An update or deletion takes the file's current
+  `sha`, and a merge can take `head_sha`; the forge refuses a stale one (Codeberg 409 for a
+  file and a merge; gitea.com 422 for a file, 409 for a merge). `head_sha` must be the full
+  40 characters: both forges compare it exactly, so an abbreviated one would never match.
+- **The merge body is spelled per flavor.** Forgejo takes `Do`, `MergeTitleField` and
+  `MergeMessageField`; Gitea takes `do`, `merge_title_field` and `merge_message_field`. Both
+  take `delete_branch_after_merge` and `head_commit_id`. Each squash merge was checked live
+  for its title and body.
+- **`edit_issue` sends only what was given.** `due_date: ""` becomes `unset_due_date: true`,
+  `milestone: 0` removes the milestone, and `state` is checked as `open` or `closed` before
+  any request. Labels go by name through their own endpoint. Both forges drop a name they
+  don't know without an error, so the issue is read back and any missing name is returned in
+  `labels_not_found`. A pull request's number works too, which is how one is closed unmerged.
+- **Paths are encoded segment by segment.** Request URLs are built by joining onto the API
+  root, so a `#` in a file name became a fragment (`get_file_contents` on
+  `docs/notes #1 Ä.md` read `docs/notes `), and `..` would resolve into another endpoint.
+  `encode_repo_path` percent-encodes each segment, keeps only the unreserved set and `/`, and
+  refuses empty, `.` and `..` segments. Branch names go through it too.
+- **A missing branch is reported as missing.** Codeberg answers `DELETE` on a branch that does
+  not exist with an empty 500 and gitea.com with a bare 404. After either, the branch is looked
+  up; when that 404s as well, the error says there was no such branch and nothing was deleted.
+
+Verified live on Codeberg and gitea.com, 24–27 October 2026: file create, update, stale-sha
+refusal and delete (including the `#` path); a comment review; a squash merge with title,
+message, `delete_branch` and `head_sha`, and its refusal on a wrong `head_sha`; branch
+deletion, including the refusal of the default branch; issue title, assignees, due date,
+closing, and closing a pull request unmerged. Not live: clearing a due date with `""`, which
+has a unit test only.
+
+**`migrate_repo`, first live run (27 October 2026).** A private gitea.com repository to
+Codeberg, with `service: gitea` and every content flag on, got an empty 500 and left an empty
+repository marked as migrating, which never finished and had to be deleted. The cause is
+unknown, and `migrate_repo` remains unverified. The repository was moved by `git push` instead.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:
@@ -1059,5 +1110,9 @@ it matters). It also shed `soft_assert` and a duplicate `thiserror` from the dep
     *(done)*
 16. **v0.22.1** — every tool titled and annotated: read-only, destructive, idempotent and
     open-world hints. *(done)*
-17. Later — issue/PR writes, sort filters on the issue lists, and slimming what still passes
-    through raw.
+17. **v0.23.0** — `edit_issue`, `merge_pull_request`, `create_pull_request_review`,
+    `delete_branch`, `create_or_update_file` and `delete_file`, with request paths encoded
+    segment by segment. *(done; verified live on Codeberg and gitea.com)*
+18. Later — sort filters on the issue lists, slimming what still passes through raw
+    (`create_repo`, `create_branch`), binding the migrate and mirror credentials to their
+    hosts, and finding out why `migrate_repo` failed on Codeberg.

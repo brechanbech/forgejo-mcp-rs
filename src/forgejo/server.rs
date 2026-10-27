@@ -830,6 +830,138 @@ impl ForgejoMcp {
         Ok(result)
     }
 
+    /// Edits an issue or a pull request's issue fields in place.
+    #[tool(
+        title = "Edit an issue",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        ),
+        description = "Edit an issue in place (owner/repo/index; requires write mode): close or reopen it with state (open/closed), or change its title, body, assignees (logins), milestone (id; 0 removes it), due_date (RFC 3339; empty removes it) or labels (names). Only the fields you pass change; title, body, assignees and labels replace what was there. Labels are matched by exact name, and any the repository has no label for are listed in `labels_not_found` rather than silently dropped. Works on a pull request's number too, so state=closed closes a pull request without merging it. Answers with the issue in get_issue's shape."
+    )]
+    async fn edit_issue(
+        &self,
+        Parameters(params): Parameters<tools::EditIssueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::edit_issue(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Merges a pull request.
+    #[tool(
+        title = "Merge a pull request",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        ),
+        description = "Merge a pull request (owner/repo/index; requires write mode). style is merge (default), rebase, rebase-merge, squash or fast-forward-only, as the repository allows; title and message set the merge commit's; delete_branch removes the head branch afterwards. Pass head_sha (get_pull_request's, in full) to merge only if nothing was pushed since you looked. The forge refuses a pull request that is not mergeable — conflicts, failing required checks or missing approvals — and says why. Answers with the pull request as it now stands, in get_pull_request's shape."
+    )]
+    async fn merge_pull_request(
+        &self,
+        Parameters(params): Parameters<tools::MergePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::merge_pull_request(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Submits a review on a pull request.
+    #[tool(
+        title = "Review a pull request",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        ),
+        description = "Submit a review on a pull request (owner/repo/index/verdict; requires write mode). verdict is approve, request_changes or comment; body is the review's summary, which the forge requires for request_changes and comment. commit_id pins the review to a commit (full SHA); by default it is the current head. A forge will not let you approve your own pull request. Answers with the review in list_pull_request_reviews' shape."
+    )]
+    async fn create_pull_request_review(
+        &self,
+        Parameters(params): Parameters<tools::CreatePullRequestReviewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::create_pull_request_review(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Deletes a branch.
+    #[tool(
+        title = "Delete a branch",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        ),
+        description = "Delete a branch (owner/repo/branch; requires write mode). The forge refuses the default branch and protected branches. Commits only that branch held become unreachable, so check it is merged first (get_pull_request's `merged`)."
+    )]
+    async fn delete_branch(
+        &self,
+        Parameters(params): Parameters<tools::DeleteBranchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::delete_branch(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Creates a file or replaces its content, as one commit.
+    #[tool(
+        title = "Create or update a file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        ),
+        description = "Create a file, or replace one's content, as a single commit (owner/repo/path/content; requires write mode). content is the whole file as UTF-8 text. To update, pass the file's current sha from get_file_contents; without sha the file is created, and the forge refuses if it already exists. A stale sha is refused too, so a change made meanwhile is not overwritten. Commits to branch (default: the default branch), or to new_branch created from it — the way to prepare a pull request. Answers with the file's new sha and the commit."
+    )]
+    async fn create_or_update_file(
+        &self,
+        Parameters(params): Parameters<tools::CreateOrUpdateFileParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::create_or_update_file(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
+    /// Deletes a file, as one commit.
+    #[tool(
+        title = "Delete a file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        ),
+        description = "Delete a file as a single commit (owner/repo/path/sha; requires write mode). sha is the file's current blob SHA from get_file_contents; a stale one is refused. Commits to branch (default: the default branch), or to new_branch created from it. Answers with the commit."
+    )]
+    async fn delete_file(
+        &self,
+        Parameters(params): Parameters<tools::DeleteFileParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.write_client()?;
+        let mut result = tools::delete_file(client, params).await?;
+        self.extend_window();
+        result.content.push(ContentBlock::text(self.window_note()));
+        Ok(result)
+    }
+
     /// Deletes a repository (guarded by an exact `owner/repo` confirmation).
     #[tool(
         title = "Delete a repository",
@@ -1120,6 +1252,13 @@ impl ServerHandler for ForgejoMcp {
              these servers may be configured at once against different forges, so \
              \"write mode is on\" without naming the instance is ambiguous. \
              delete_repo needs a `confirm` argument exactly equal to \"owner/repo\". \
+             The other writes need write mode too: create_issue, edit_issue (which also closes \
+             or reopens an issue or pull request), comment_on_issue, create_branch, \
+             delete_branch, create_pull_request, create_pull_request_review, \
+             merge_pull_request, and the single-commit file writes create_or_update_file and \
+             delete_file. Both file writes take the file's current sha from get_file_contents \
+             and refuse a stale one; merge_pull_request takes head_sha the same way, so a \
+             change pushed after you looked is never merged or overwritten unseen. \
              Push-mirror tools (add/list/delete/sync_push_mirrors) also require write mode; \
              add_push_mirror reads the remote push credential from the server's \
              FORGEJO_MIRROR_TOKEN env var (or use_ssh=true) — never pass a token as an argument. \
@@ -1354,11 +1493,16 @@ mod tests {
             destructive,
             [
                 "cancel_workflow_run",
+                "create_or_update_file",
+                "delete_branch",
+                "delete_file",
                 "delete_push_mirror",
                 "delete_release_asset",
                 "delete_repo",
+                "edit_issue",
                 "edit_release",
                 "edit_repo",
+                "merge_pull_request",
                 "rerun_workflow",
                 "sync_push_mirrors",
             ]

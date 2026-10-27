@@ -320,6 +320,32 @@ impl RestClient {
             .unwrap_or(Value::Null))
     }
 
+    /// `PUT` of a JSON body returning the resource it replaced or updated.
+    ///
+    /// # Errors
+    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures.
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
+        Ok(self
+            .request(Method::PUT, path, &[], Some(body))
+            .await?
+            .0
+            .unwrap_or(Value::Null))
+    }
+
+    /// `DELETE` carrying a JSON body, returning whatever the server answers ([`Value::Null`] for
+    /// an empty `204`). For the deletes that need more than the path to act on — removing a file
+    /// is a commit, so it takes the blob `sha`, a message and a branch.
+    ///
+    /// # Errors
+    /// Propagates transport, non-2xx ([`ApiError::Status`]), and decode failures.
+    pub async fn delete_with_body(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
+        Ok(self
+            .request(Method::DELETE, path, &[], Some(body))
+            .await?
+            .0
+            .unwrap_or(Value::Null))
+    }
+
     /// `POST` of a `multipart/form-data` body carrying one file part, returning the created
     /// resource.
     ///
