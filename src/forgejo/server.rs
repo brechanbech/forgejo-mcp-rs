@@ -200,7 +200,7 @@ impl ForgejoMcp {
     #[tool(
         title = "Who am I",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Report the authenticated Forgejo/Codeberg/Gitea user (verifies the token)"
+        description = "Report the account this server's token belongs to, as the forge returns it: login (the owner name for your own repos), full_name, email, is_admin, visibility, created and last_login among others. A cheap first call: it proves the token works, and if it fails, the token or FORGEJO_URL is wrong and no other tool will work either. Use version for the server and forge versions, and write_status for whether writes are possible."
     )]
     async fn whoami(&self) -> Result<CallToolResult, McpError> {
         tools::whoami(&self.forgejo).await
@@ -210,7 +210,7 @@ impl ForgejoMcp {
     #[tool(
         title = "Server and instance version",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Report this MCP server's version, the connected instance's version, and whether it is Forgejo or Gitea"
+        description = "Report this MCP server's name and version, the connected instance's URL and version, and whether it is Forgejo or Gitea (`flavor`). Use it to tell whether a version-dependent tool will work: cancel_workflow_run needs Forgejo 16 or later and rerun_workflow Forgejo 17. If the instance can't be reached, instance_version says why instead of the call failing. Use whoami to check the token."
     )]
     async fn version(&self) -> Result<CallToolResult, McpError> {
         tools::version(&self.forgejo).await
@@ -220,7 +220,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List my repositories",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List the authenticated user's repositories (optional page/limit)"
+        description = "List the repositories your account can work in: your own, plus those of organizations you belong to and those you collaborate on, sorted by name (case-insensitive). Without page/limit it walks every page and returns the whole set, up to 1,000 with `truncated` set beyond that; with page/limit it returns one page (at most 50). Each repo is slimmed to full_name, description, private, fork, archived, language, counts, size, default_branch, URLs and dates. Use search_repos to find repos anywhere on the instance, and get_repo for one repo's details."
     )]
     async fn list_my_repos(
         &self,
@@ -389,7 +389,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List branches",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List branches in a repository (owner/repo); auto-paginated, slimmed"
+        description = "List a repository's branches (owner/repo), most recently pushed first, each slimmed to name, head commit SHA and whether it is protected. Without page/limit it walks every page and returns them all, up to 1,000 with `truncated` set beyond that; with page/limit it returns one page. Use get_repo for the default branch, list_branch_protections for the protection rules themselves, and list_commits for a branch's history."
     )]
     async fn list_branches(
         &self,
@@ -428,7 +428,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List my organizations",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List the organizations you belong to (optional page/limit)"
+        description = "List the organizations your account belongs to, as the forge returns them: username (the owner name to pass to other tools), full_name, description, visibility, website and location. One page at a time (page/limit, at most 50), with `total` giving the count; an account in no organization gets an empty list. An organization's repos you can reach are already in list_my_repos."
     )]
     async fn list_orgs(
         &self,
@@ -441,7 +441,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List notifications",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List your notification threads (unread by default; pass all=true for read+unread). Optional page/limit"
+        description = "List your notification threads, most recently updated first: unread only by default, read ones too with all=true. Each is slimmed to id, unread, repo, type (Issue, Pull, Commit or Repository), state, title, url and updated_at, with `total` giving the full count. One page at a time (page/limit, at most 50). Listing does not mark anything read, and this server has no tool that does. To read the thread behind one, use get_issue or get_pull_request on its repo and number."
     )]
     async fn list_notifications(
         &self,
@@ -560,7 +560,7 @@ impl ForgejoMcp {
     #[tool(
         title = "Write mode status",
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Report write-mode status: which instance this server writes to, whether a write token is configured, whether write mode is active, and minutes remaining"
+        description = "Report write-mode status: which instance this server writes to, whether a write token is configured, whether write mode is active, and minutes remaining. Changes nothing and does not contact the forge. Call it before a write to learn whether enable_write_mode is needed, or whether no write token is configured, in which case enabling cannot help and the user has to set FORGEJO_TOKEN_WRITE."
     )]
     async fn write_status(&self) -> Result<CallToolResult, McpError> {
         let remaining = self.minutes_remaining();
@@ -623,7 +623,7 @@ impl ForgejoMcp {
             idempotent_hint = true,
             open_world_hint = false
         ),
-        description = "Leave write mode immediately (back to read-only)"
+        description = "Leave write mode now instead of waiting for it to time out, so write tools are refused again until enable_write_mode. Harmless when write mode is already off. Answers with the instance and write_mode_active=false; tell the user, naming the instance. Call it as soon as a batch of writes is done."
     )]
     async fn disable_write_mode(&self) -> Result<CallToolResult, McpError> {
         self.elevation.disable();
@@ -685,7 +685,7 @@ impl ForgejoMcp {
             idempotent_hint = false,
             open_world_hint = true
         ),
-        description = "Create a repository for the authenticated user (requires write mode; defaults to private). Answers with the repository in get_repo's shape."
+        description = "Create a repository under your own account, not an organization (requires write mode; defaults to private). It starts empty, with no commit or branch, so push to it or add a first file with create_or_update_file. Not idempotent: it fails if you already have a repo of that name. Answers with the repository in get_repo's shape. To copy an existing repo in from another instance, with its issues and pull requests, use migrate_repo instead; edit_repo changes settings afterwards."
     )]
     async fn create_repo(
         &self,
@@ -817,7 +817,7 @@ impl ForgejoMcp {
             idempotent_hint = false,
             open_world_hint = true
         ),
-        description = "Comment on an issue or pull request (owner/repo/index/body; requires write mode)"
+        description = "Post a comment on an issue or pull request (they share one numbering), as the write token's account; requires write mode. The body is Markdown and is public on a public repo: @mentions notify those users, and everyone watching the issue is notified. Not idempotent: calling twice posts twice, so check list_issue_comments before retrying a call whose result you did not see. Answers with the new comment in list_issue_comments' shape (id, user, body, created_at, url). To close, reopen or relabel, use edit_issue; for a pull-request review with a verdict, create_pull_request_review."
     )]
     async fn comment_on_issue(
         &self,
@@ -971,7 +971,7 @@ impl ForgejoMcp {
             idempotent_hint = true,
             open_world_hint = true
         ),
-        description = "Delete a repository (requires write mode; `confirm` must be exactly \"owner/repo\")"
+        description = "Permanently delete a repository with its issues, pull requests, releases, wiki and settings. There is no undo, so have the user confirm the exact repo first. Requires write mode, a write token with admin rights on the repo, and `confirm` exactly equal to \"owner/repo\"; a mismatch is refused before anything is sent. Answers {deleted: \"owner/repo\"}. To retire a repo but keep it readable, archive it with edit_repo (archived=true) instead."
     )]
     async fn delete_repo(
         &self,
@@ -1012,7 +1012,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List push mirrors",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List the push mirrors configured on a repository (owner/repo). Requires write mode (mirror config is repo-admin-scoped). Secrets are never returned."
+        description = "List the push mirrors configured on a repository (owner/repo): for each, its remote_name (which delete_push_mirror takes), remote_address, sync interval, whether it syncs on every commit, and when it last synced and with what error, if any. Requires write mode (mirror config is repo-admin-scoped), though it changes nothing. Secrets are never returned. Use it after sync_push_mirrors to see whether the push worked."
     )]
     async fn list_push_mirrors(
         &self,
@@ -1033,7 +1033,7 @@ impl ForgejoMcp {
             idempotent_hint = true,
             open_world_hint = true
         ),
-        description = "Remove a push mirror from a repository by its remote_name (from list_push_mirrors). Requires write mode."
+        description = "Remove one push mirror from a repository, by its remote_name from list_push_mirrors. Requires write mode. Only the mirror's configuration goes: syncing to that remote stops, and the remote repository and everything already pushed to it are left untouched. Answers {deleted: remote_name}. To stop syncing on every commit but keep the mirror, there is no edit tool; delete it and add it again with add_push_mirror."
     )]
     async fn delete_push_mirror(
         &self,
@@ -1055,7 +1055,7 @@ impl ForgejoMcp {
             idempotent_hint = true,
             open_world_hint = true
         ),
-        description = "Trigger an immediate push-mirror sync for a repository (owner/repo). Requires write mode."
+        description = "Push a repository (owner/repo) to all of its push mirrors now, instead of waiting for their interval. Requires write mode. A mirror push makes each remote match this repository, so branches and tags that exist only on the remote are overwritten or deleted; that is why it is marked destructive. Answers {sync_requested: \"owner/repo\"} once the forge has queued the sync; the push itself runs in the background, so check each mirror's last sync time and error with list_push_mirrors afterwards."
     )]
     async fn sync_push_mirrors(
         &self,

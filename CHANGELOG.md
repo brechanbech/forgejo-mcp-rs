@@ -32,6 +32,20 @@ records what changed, that one records why.
   `limit`, and its description says what a comment holds, the order, and what the list leaves
   out (the issue's own description, events, inline review comments). Glama rated the old one
   3.1 of 5.
+- Twelve more tools had a description of one line, under 155 characters, and now say what they
+  return, what they change, and which tool to use instead. They are `whoami`, `version`,
+  `list_my_repos`, `list_orgs`, `list_branches`, `list_notifications`, `comment_on_issue`,
+  `create_repo`, `delete_repo`, `list_push_mirrors`, `delete_push_mirror` and
+  `sync_push_mirrors`, plus `write_status` and `disable_write_mode`. The facts were checked
+  live:
+  - `list_my_repos` includes the repos of your organizations and collaborations, sorted by
+    name.
+  - Branches and notifications come most recent first.
+  - A comment is posted publicly and notifies watchers and @mentions, and posting twice posts
+    twice.
+  - A new repo starts with no commit.
+  - A mirror sync overwrites refs that exist only on the remote, and runs in the background.
+  The tool listing grows from 72.7 KB to 77.5 KB.
 
 ### Fixed
 - The `query` parameter's documentation claimed descriptions are searched by default. They
