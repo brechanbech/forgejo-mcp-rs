@@ -1,0 +1,64 @@
+name: ci
+
+# Builds and tests on GitHub's hosted runners, which the mirror gets for free.
+# The canonical CI is .forgejo/workflows/ci.yml on Codeberg; this one repeats
+# formatting, clippy with warnings denied, and the offline test suite on Linux
+# and macOS, plus a build on the declared MSRV. cargo deny stays on Codeberg.
+#
+# The `if: github.server_url` guard keeps every job GitHub-only. Forgejo reads
+# .forgejo/workflows in preference to this directory, but the guard makes the
+# file inert on Codeberg even if that ever changes.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    if: github.server_url == 'https://github.com'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # rustup is preinstalled on the hosted runners; rust-toolchain.toml picks
+      # stable with rustfmt and clippy. No third-party action.
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+  msrv:
+    # `rust-version` in Cargo.toml is a promise; this keeps it honest.
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # The override beats rust-toolchain.toml's stable channel.
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Build
+        run: cargo +1.88.0 build --locked --all-targets
