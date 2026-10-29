@@ -14,6 +14,8 @@ records what changed, that one records why.
 - `search_repos` takes `include_description`, which matches the keyword in descriptions too.
   Without it both forges match names and topics only; on Codeberg a search for `mcp` goes
   from 783 matches to 919.
+- `list_issue_comments` takes `since` and `before`, which keep only comments updated in that
+  window.
 
 ### Changed
 - `search_repos` answers in `list_my_repos`' slim shape instead of passing through the
@@ -26,9 +28,17 @@ records what changed, that one records why.
   to use `list_my_repos`, `get_repo` or `list_orgs` instead. Glama rated the old one-line
   description 2.9 of 5.
 
+- `list_issue_comments` returns the whole thread with `total` when called without `page` or
+  `limit`, and its description says what a comment holds, the order, and what the list leaves
+  out (the issue's own description, events, inline review comments). Glama rated the old one
+  3.1 of 5.
+
 ### Fixed
 - The `query` parameter's documentation claimed descriptions are searched by default. They
   are not.
+- `list_issue_comments`' `page` and `limit` did nothing: both forges ignore them on this
+  endpoint and send every comment, so a call for page 2 of 5 got all 69 comments of a Codeberg
+  thread labelled as page 2. The tool now fetches the thread once and pages it itself.
 
 ## [0.26.0] — 2026-10-27
 

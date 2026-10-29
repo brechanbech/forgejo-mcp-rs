@@ -274,7 +274,7 @@ Grouped by subject. The second column marks the tools that need write mode.
 | Tool |  | Notes |
 |---|---|---|
 | `list_issues` / `get_issue` | read | Issues in `owner/repo` (open by default), without the pull requests the forges also list as issues. Filter by `labels`, `milestones`, `author`, `assignee`, `mentioned`, `search`, and `since`/`before`; an unknown label or milestone name is refused, since the forge would list everything. `sort` (`oldest`, `recentupdate`, `mostcomment`, `nearduedate`, …) works on Forgejo; Gitea's issue listing has none, so it is refused there. Slimmed: state, author, labels, assignees, milestone, comment count and dates; `get_issue` adds the body |
-| `list_issue_comments` | read | Comments on an issue/PR (slimmed) |
+| `list_issue_comments` | read | The whole comment thread on an issue/PR, oldest first, slimmed; `since`/`before` filters, and `page`/`limit` paged here |
 | `create_issue` | **write** | Create an issue (owner/repo/title, optional body) |
 | `edit_issue` | **write** | Edit an issue in place (owner/repo/index): `state` open/closed, `title`, `body`, `assignees`, `milestone`, `due_date`, `labels` (names). Only what is passed changes; works on a pull request's number too, so `state: closed` closes a PR unmerged |
 | `comment_on_issue` | **write** | Comment on an issue/PR (owner/repo/index/body) |

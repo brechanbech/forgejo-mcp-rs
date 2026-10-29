@@ -521,13 +521,18 @@ impl Forge {
         owner: &str,
         repo: &str,
         index: i64,
-        page: Option<u32>,
-        limit: Option<u32>,
+        since: Option<&str>,
+        before: Option<&str>,
     ) -> Result<(Value, Option<usize>), ForgeError> {
+        // No paging: both forges ignore `page` and `limit` here and send the whole thread.
+        let query: Vec<(&str, String)> = [("since", since), ("before", before)]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v.to_owned())))
+            .collect();
         self.rest
             .get_list(
                 &format!("repos/{owner}/{repo}/issues/{index}/comments"),
-                &paging(page, limit),
+                &query,
             )
             .await
     }

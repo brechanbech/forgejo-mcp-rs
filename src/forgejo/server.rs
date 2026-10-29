@@ -454,7 +454,7 @@ impl ForgejoMcp {
     #[tool(
         title = "List issue comments",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "List the comments on an issue or pull request (owner/repo/index; optional page/limit)"
+        description = "List the discussion comments on an issue or pull request (owner/repo/index), oldest first. Each comment is {id, user, body, created_at, url}. Returns the whole thread with `total` unless you pass page/limit, which page through it here (limit defaults to 50), since the forge always sends every comment; since/before keep only comments updated in that window. Not included: the issue's own description (use get_issue), events such as label or assignee changes, and a pull request's inline code-review comments (list_pull_request_reviews gives the reviews). Bot comments are ordinary comments and are included."
     )]
     async fn list_issue_comments(
         &self,

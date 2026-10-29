@@ -1975,32 +1975,54 @@ pub struct ListCommentsParams {
     pub repo: String,
     /// Issue or pull-request number.
     pub index: i64,
-    /// 1-based page number.
+    /// Only comments updated at or after this time (RFC 3339, e.g. `2026-10-01T00:00:00Z`).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Only comments updated before this time (RFC 3339).
+    #[serde(default)]
+    pub before: Option<String>,
+    /// 1-based page number, counted over the oldest-first thread.
     #[serde(default)]
     pub page: Option<u32>,
-    /// Results per page.
+    /// Comments per page; defaults to 50 when only `page` is given.
     #[serde(default)]
     pub limit: Option<u32>,
 }
 
+/// Page size for `list_issue_comments` when `page` is given without `limit`.
+const COMMENT_PAGE_SIZE: u32 = 50;
+
 /// Lists the comments on an issue or pull request.
+///
+/// Both forges ignore `page` and `limit` on this endpoint and always send the whole thread,
+/// oldest first (checked live: a 69-comment Codeberg issue and a 5-comment gitea.com one came
+/// back whole for `limit=5`/`limit=2`). So the thread is fetched once and paged here.
 pub async fn list_issue_comments(
     forge: &Forge,
     params: ListCommentsParams,
 ) -> Result<CallToolResult, McpError> {
-    let (raw, total) = forge
+    let (raw, _) = forge
         .list_issue_comments(
             &params.owner,
             &params.repo,
             params.index,
-            params.page,
-            params.limit,
+            params.since.as_deref(),
+            params.before.as_deref(),
         )
         .await
         .map_err(to_mcp)?;
     let comments: Vec<RawComment> = decode(raw)?;
     let items: Vec<CommentSummary> = comments.into_iter().map(summarize_comment).collect();
-    paged_result(params.page, params.limit, total, &items)
+    if params.page.is_none() && params.limit.is_none() {
+        return gathered_result(&items, Some(items.len()), false);
+    }
+    let (page, limit) = (
+        params.page.unwrap_or(1).max(1),
+        params.limit.unwrap_or(COMMENT_PAGE_SIZE).max(1),
+    );
+    let start = usize::try_from(u64::from(page - 1) * u64::from(limit)).unwrap_or(usize::MAX);
+    let window: Vec<&CommentSummary> = items.iter().skip(start).take(limit as usize).collect();
+    paged_result(Some(page), Some(limit), Some(items.len()), &window)
 }
 
 // A loose review shape; `state` stays a string so unfamiliar values don't break parsing.

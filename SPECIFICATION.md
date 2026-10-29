@@ -151,7 +151,7 @@ token-broker process, which is out of scope.
 | `search_repos` | **done** | Search repositories by name and topic (`include_description` adds descriptions); slimmed and counted since v0.27.0. |
 | `list_orgs` | **done** | Organizations the user belongs to. |
 | `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
-| `list_issue_comments` | **done** | Comments on an issue/PR, slimmed. |
+| `list_issue_comments` | **done** | Comments on an issue/PR, slimmed. Both forges ignore `page`/`limit` here and send the whole thread, so since v0.27.0 it pages on our side and takes `since`/`before`. |
 | `list_workflow_runs` | **done** | Actions runs in `owner/repo`, slimmed; filter by `head_sha`/`ref`/`status`/`event`/`workflow_id`. |
 | `get_workflow_run` | **done** | One Actions run by id (a run's outcome is its `status`). |
 | `dispatch_workflow` | **done** | Write-mode. Trigger a `workflow_dispatch` run by workflow file name. |
