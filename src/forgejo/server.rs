@@ -415,7 +415,7 @@ impl ForgejoMcp {
     #[tool(
         title = "Search repositories",
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Search repositories by keyword (optional page/limit)"
+        description = "Find repositories anywhere on the instance by keyword: a case-insensitive substring of the repo name or one of its topics (include_description=true widens it to descriptions; owner names are not searched). Covers every repo this token can see, private ones included. Results come alphabetically by name, not ranked by relevance, one page at a time (set limit, up to 50, and page), in list_my_repos' slim shape (full_name, description, private, stars, size, urls, dates), with `total` giving the full match count. Use list_my_repos for your own repos, get_repo when you already know owner/repo, and list_orgs for the organizations you belong to."
     )]
     async fn search_repos(
         &self,

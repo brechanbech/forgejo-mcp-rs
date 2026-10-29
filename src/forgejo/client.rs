@@ -475,16 +475,21 @@ impl Forge {
             .await
     }
 
-    /// `GET /repos/search` — repository search. Returns `{ ok, data }`.
+    /// `GET /repos/search` — repository search. Returns `{ ok, data }` and the match count from
+    /// `X-Total-Count`. `includeDesc` widens the match from names and topics to descriptions.
     pub async fn search_repos(
         &self,
         query: &str,
+        include_description: bool,
         page: Option<u32>,
         limit: Option<u32>,
-    ) -> Result<Value, ForgeError> {
+    ) -> Result<(Value, Option<usize>), ForgeError> {
         let mut q = paging(page, limit);
         q.push(("q", query.to_owned()));
-        self.rest.get("repos/search", &q).await
+        if include_description {
+            q.push(("includeDesc", "true".to_owned()));
+        }
+        self.rest.get_list("repos/search", &q).await
     }
 
     /// `GET /user/orgs` — organizations the authenticated user belongs to.
@@ -492,8 +497,8 @@ impl Forge {
         &self,
         page: Option<u32>,
         limit: Option<u32>,
-    ) -> Result<Value, ForgeError> {
-        self.rest.get("user/orgs", &paging(page, limit)).await
+    ) -> Result<(Value, Option<usize>), ForgeError> {
+        self.rest.get_list("user/orgs", &paging(page, limit)).await
     }
 
     /// `GET /notifications` — the user's notification threads (unread unless `all`).
@@ -502,12 +507,12 @@ impl Forge {
         all: Option<bool>,
         page: Option<u32>,
         limit: Option<u32>,
-    ) -> Result<Value, ForgeError> {
+    ) -> Result<(Value, Option<usize>), ForgeError> {
         let mut query = paging(page, limit);
         if let Some(all) = all {
             query.push(("all", all.to_string()));
         }
-        self.rest.get("notifications", &query).await
+        self.rest.get_list("notifications", &query).await
     }
 
     /// `GET /repos/{owner}/{repo}/issues/{index}/comments` — comments on an issue or PR.

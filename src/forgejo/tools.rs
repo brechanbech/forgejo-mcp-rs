@@ -181,12 +181,17 @@ pub struct PageParams {
 /// Parameters for the `search_repos` tool.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct SearchReposParams {
-    /// Search query (keywords; matches repository names and, by default, descriptions).
+    /// Keyword, matched case-insensitively as a substring of repository names and topics
+    /// (`mcp` finds `forgejo-mcp-rs` and a repo tagged `mcp23017`). Not owner names.
     pub query: String,
+    /// Also match the keyword in repository descriptions. Defaults to false; on Codeberg it
+    /// widened a search for `mcp` from 783 matches to 919.
+    #[serde(default)]
+    pub include_description: Option<bool>,
     /// 1-based page number.
     #[serde(default)]
     pub page: Option<u32>,
-    /// Results per page.
+    /// Results per page. Without it Codeberg returns 30 and gitea.com 10; both cap it at 50.
     #[serde(default)]
     pub limit: Option<u32>,
 }
@@ -1811,32 +1816,36 @@ pub async fn get_pull_request(
     json_result(&pull_detail(&pr))
 }
 
-/// Searches repositories by keyword.
+/// Searches repositories by keyword, slimmed to `list_my_repos`' shape.
 pub async fn search_repos(
     forge: &Forge,
     params: SearchReposParams,
 ) -> Result<CallToolResult, McpError> {
-    // `repo_search` returns `{ ok, data }` (no count header), so `total` is unknown here —
-    // surface `data` in the same envelope for consistency.
-    let results = forge
-        .search_repos(&params.query, params.page, params.limit)
+    // `repo_search` wraps its results as `{ ok, data }`; the match count comes from
+    // `X-Total-Count`, which both forges send (checked live on Codeberg and gitea.com).
+    let (results, total) = forge
+        .search_repos(
+            &params.query,
+            params.include_description.unwrap_or(false),
+            params.page,
+            params.limit,
+        )
         .await
         .map_err(to_mcp)?;
     let items = match results {
         Value::Object(mut map) => into_items(map.remove("data").unwrap_or(Value::Null)),
         _ => Vec::new(),
     };
-    paged_result(params.page, params.limit, None, &items)
+    paged_result(params.page, params.limit, total, &slim_repos(items))
 }
 
 /// Lists the organizations the authenticated user belongs to.
 pub async fn list_orgs(forge: &Forge, params: PageParams) -> Result<CallToolResult, McpError> {
-    // Returns a bare array (no count header), so `total` is unknown here.
-    let orgs = forge
+    let (orgs, total) = forge
         .list_orgs(params.page, params.limit)
         .await
         .map_err(to_mcp)?;
-    paged_result(params.page, params.limit, None, &into_items(orgs))
+    paged_result(params.page, params.limit, total, &into_items(orgs))
 }
 
 /// Parameters for the `list_notifications` tool.
@@ -1914,14 +1923,13 @@ pub async fn list_notifications(
     forge: &Forge,
     params: ListNotificationsParams,
 ) -> Result<CallToolResult, McpError> {
-    // No count header on this endpoint, so `total` is `None`.
-    let raw = forge
+    let (raw, total) = forge
         .list_notifications(params.all, params.page, params.limit)
         .await
         .map_err(to_mcp)?;
     let threads: Vec<LooseNotification> = decode(raw)?;
     let items: Vec<NotificationSummary> = threads.into_iter().map(summarize_notification).collect();
-    paged_result(params.page, params.limit, None, &items)
+    paged_result(params.page, params.limit, total, &items)
 }
 
 // A loose comment shape, capturing only the fields we surface.

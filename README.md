@@ -240,7 +240,7 @@ Grouped by subject. The second column marks the tools that need write mode.
 | Tool |  | Notes |
 |---|---|---|
 | `list_my_repos` | read | Your repositories (auto-paginated, slimmed) |
-| `search_repos` | read | Repository search by keyword |
+| `search_repos` | read | Repositories whose name or topics match a keyword (`include_description` widens it), slimmed like `list_my_repos`, with the match count |
 | `get_repo` | read | One repository's details (incl. default branch, size in KiB, and the `has_*` unit toggles), slimmed |
 | `create_repo` | **write** | Create a repo (defaults to private) |
 | `edit_repo` | **write** | Edit repo settings — visibility, description, website, default branch, unit toggles (issues, PRs, wiki, releases, actions, packages, projects), archive. Only provided fields change; no renames. A unit that is **off** 404s its whole endpoint family rather than returning empty results, so `has_releases` / `has_actions` are what to set when those tools report a repo as missing when it plainly exists |
@@ -330,7 +330,7 @@ Read list tools accept optional `state` (`open`/`closed`/`all`) and `page`/`limi
 with no paging, `list_my_repos` / `list_issues` / `list_pull_requests` auto-paginate the whole
 set and return a `{ returned, total, truncated, items }` envelope; pass an explicit `page` or
 `limit` for a single page, which returns `{ page, limit, returned, total, items }` instead
-(`total` is `null` for `search_repos`, which reports no count). Results are slimmed to the
+(`total` is `null` only where a forge sends no count). Results are slimmed to the
 fields that matter, and a write answers in the shape of the matching read tool. The **write**
 tools require [write mode](#write-mode).
 

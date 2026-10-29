@@ -148,7 +148,7 @@ token-broker process, which is out of scope.
 | `get_issue` | **done** | One issue by number. Slimmed since v0.22.0, like the listing, plus the body. |
 | `list_pull_requests` | **done** | Pull requests in `owner/repo` (open by default); `base`/`head` branch filters since v0.21.0. |
 | `get_pull_request` | **done** | One pull request by number. Slimmed since v0.21.0, like the listing, plus description, reviewers and merge details. |
-| `search_repos` | **done** | Search repositories by keyword. |
+| `search_repos` | **done** | Search repositories by name and topic (`include_description` adds descriptions); slimmed and counted since v0.27.0. |
 | `list_orgs` | **done** | Organizations the user belongs to. |
 | `list_notifications` | **done** | Notification threads, slimmed (`all` includes read). |
 | `list_issue_comments` | **done** | Comments on an issue/PR, slimmed. |
@@ -167,8 +167,9 @@ and `page` / `limit` pagination (sent as query parameters). An invalid `state` i
 with `invalid_params` before any request is made. Each list tool returns a
 `{ page, limit, returned, total, items }` envelope; `total` comes from the endpoint's
 `X-Total-Count` header (the client parses it when present), so the caller can tell whether
-more pages remain. `search_repos`, `list_orgs`, and `list_notifications` report `total: null`
-(those endpoints send no count header).
+more pages remain. `search_repos`, `list_orgs` and `list_notifications` were once thought to
+send no count; checked live on Codeberg and gitea.com in October 2026, all three do, and
+report `total` since v0.27.0.
 
 `list_notifications` returns **slimmed** summaries (`id`, `repo`, `type`, `state`, `title`,
 `unread`, `url`, `updated_at`) — the raw threads embed a full repository object each. We

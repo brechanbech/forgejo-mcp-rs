@@ -8,6 +8,28 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [Unreleased]
+
+### Added
+- `search_repos` takes `include_description`, which matches the keyword in descriptions too.
+  Without it both forges match names and topics only; on Codeberg a search for `mcp` goes
+  from 783 matches to 919.
+
+### Changed
+- `search_repos` answers in `list_my_repos`' slim shape instead of passing through the
+  forge's full repository objects, about 2.5 KB each. **Breaking** for a caller that read
+  fields outside the slim set.
+- `search_repos`, `list_orgs` and `list_notifications` report `total`. All three endpoints send
+  `X-Total-Count` on Codeberg and gitea.com; the old code assumed they didn't.
+- `search_repos`' description says what it matches, that private repos the token can see are
+  included, that results come alphabetically rather than by relevance, the page size, and when
+  to use `list_my_repos`, `get_repo` or `list_orgs` instead. Glama rated the old one-line
+  description 2.9 of 5.
+
+### Fixed
+- The `query` parameter's documentation claimed descriptions are searched by default. They
+  are not.
+
 ## [0.26.0] — 2026-10-27
 
 ### Added
