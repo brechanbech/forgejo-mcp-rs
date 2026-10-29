@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # rustup is preinstalled on the hosted runners; rust-toolchain.toml picks
       # stable with rustfmt and clippy. No third-party action.
@@ -54,7 +54,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # The override beats rust-toolchain.toml's stable channel.
       - name: Install Rust 1.88
