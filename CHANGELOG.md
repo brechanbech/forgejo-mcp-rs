@@ -8,7 +8,7 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
-## [Unreleased]
+## [0.27.0] — 2026-10-29
 
 ### Added
 - `search_repos` takes `include_description`, which matches the keyword in descriptions too.
