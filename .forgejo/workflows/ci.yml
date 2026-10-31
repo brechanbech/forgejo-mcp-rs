@@ -30,7 +30,10 @@ jobs:
           git -c protocol.version=2 fetch -q --depth 1 origin "$GITHUB_SHA"
           git checkout -q FETCH_HEAD
       - name: Toolchain
-        run: rustc --version && cargo --version
+        # rust:latest no longer ships rustfmt or clippy (1.99.1 image, October 2026).
+        run: |
+          rustup component add rustfmt clippy
+          rustc --version && cargo --version
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
