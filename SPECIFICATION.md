@@ -1062,6 +1062,25 @@ Each silent case is turned into a refusal:
 
 Pull-request labels and milestones are left out: both forges take them as ids there, not names.
 
+### Unreleased — rmcp 3.9
+
+**rmcp 3.8 to 3.9.** One change reaches this server. On stdio, a message that parses as JSON
+but is not valid JSON-RPC is answered with "Invalid request". rmcp used to write that reply
+inside `receive`, which the service loop polls within a `select!`, so a cancelled receive could
+drop the reply half-written. 3.9 queues it and finishes writing it on the next `receive`. The
+other server-side changes leave this server as it was:
+
+- **The Skills extension (SEP-2640)** adds `skills/list`, `skills/get` and
+  `resources/directory/read`. They answer `-32601` unless the server declares the extension,
+  and this one does not.
+- **`outputSchema` is now generated for what a type serializes**, not what it deserializes.
+  No tool here declares an output schema; every result is text content.
+- **The rule against server-to-client requests on protocol `2026-07-28`** now also covers
+  `server/discover` sessions on stdio. This server sends no such requests: no sampling,
+  elicitation or roots.
+
+The rest is authorization, Streamable HTTP and client fixes.
+
 ## Error handling
 
 `ApiError`s map to MCP errors in `mcp_core::to_mcp`, keyed off `ApiError::is_caller_error`:

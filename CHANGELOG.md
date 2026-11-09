@@ -8,6 +8,12 @@ breaking-change slot.
 Design *rationale* for each release lives in [`SPECIFICATION.md`](SPECIFICATION.md) — this file
 records what changed, that one records why.
 
+## [Unreleased]
+
+### Changed
+- rmcp 3.9 (from 3.8). The stdio transport's "Invalid request" reply to a malformed message
+  is no longer lost when a read is cancelled partway through writing it. No tool changes.
+
 ## [0.27.0] — 2026-10-29
 
 ### Added
