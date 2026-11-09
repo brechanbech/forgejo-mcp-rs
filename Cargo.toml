@@ -42,7 +42,7 @@ pedantic = { level = "warn", priority = -1 }
 
 [dependencies]
 # --- MCP ---
-rmcp = { version = "3.8", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.9", features = ["server", "macros", "transport-io"] }
 
 # --- REST over reqwest ---
 # rustls (bundled webpki roots) instead of the default native-tls: pure-Rust TLS, no Apple/OpenSSL
